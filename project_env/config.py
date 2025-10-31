@@ -17,4 +17,4 @@ GCS_CLOUD_PROJECT = os.environ.get("GCS_CLOUD_PROJECT")
 TELEGRAM_API_TOKEN = "telegram_api_id"
 TELEGRAM_HASH = "telegram_hash"
 
-KEYWORDS = '../keywords.csv.csv'
+KEYWORDS = '../keywords.csv'
