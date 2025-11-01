@@ -2,3 +2,4 @@ python-dotenv
 telethon
 google-cloud-secret-manager
 google-cloud-storage
+aiohttp
