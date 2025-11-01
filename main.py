@@ -8,7 +8,10 @@ from telethon import TelegramClient
 from gcp.get_secret import get_secret
 from gcp.clostorage import load_last_checked_ids, save_last_checked_ids
 
-logging.basicConfig(level=logging.INFO)
+# Get the root logger (which GCF has already configured)
+logger = logging.getLogger()
+# Set its level directly
+logger.setLevel(logging.INFO)
 
 API_ID = get_secret('telegram_api_id', ncoding="yes")
 API_HASH = get_secret('telegram_api_hash', ncoding="yes")
@@ -147,6 +150,7 @@ async def poll_telegram():
                 logging.error(f"Could not resolve {chat_ref}: {e}")
 
         # Process messages
+        #logging.info(f"Starting to scan. Found {len(resolved_entities)} entities to process.")
         for entity in resolved_entities:
 
             # --- FIX 2: Use string for all key operations ---
@@ -154,7 +158,7 @@ async def poll_telegram():
 
             # Use the string key to get the last ID
             current_last_id = last_checked_ids.get(chat_id_str, 0)
-            logging.debug(f"\n▶️ Scanning '{entity.title}' (ID: {chat_id_str}) after ID {current_last_id}")
+            logging.info(f"\n▶️ Scanning '{entity.title}' (ID: {chat_id_str}) after ID {current_last_id}")
 
             await asyncio.sleep(2)  # Delay for stability
 
@@ -164,7 +168,7 @@ async def poll_telegram():
                 logging.debug("No new messages found.")
                 continue
 
-            logging.info(f"Fetched {len(messages)} new messages.")
+            logging.debug(f"Fetched {len(messages)} new messages.")
 
             max_id = current_last_id
 
