@@ -1,0 +1,17 @@
+# requirements.txt
+
+# Look in our private repo FIRST
+--index-url https://us-central1-python.pkg.dev/handy-cache-476919-t4/bike-data-magic/simple/
+
+# If not found, look in PyPI
+--extra-index-url https://pypi.org/simple
+
+#gcp_actions==0.2.2
+-e /home/stas/mega/projects/gcp_actions
+python-dotenv
+telethon
+google-cloud-secret-manager
+google-cloud-firestore
+google-cloud-storage
+google-cloud-logging
+aiohttp
