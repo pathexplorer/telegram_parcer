@@ -23,7 +23,10 @@ async def send_bot_notification(text_message):
         async with session.post(bot_url, json=payload) as resp:
             if resp.status != 200:
                 response_text = await resp.text()
-                logging.critical(f"❌ ERROR sending bot notification: {resp.status} - {response_text}")
+                error_msg = f"Bot API returned {resp.status}: {response_text}"
+                logging.critical(f"❌ {error_msg}")
+                # Raise so the caller can retry / not advance the cursor
+                raise RuntimeError(error_msg)
             else:
                 logging.info("✅ Bot notification sent successfully.")
 

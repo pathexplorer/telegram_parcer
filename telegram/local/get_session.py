@@ -20,12 +20,11 @@ def get_telegram_secrets():
     logger.info(f"✅ Injected {len(current_secret_telegram_data)} configuration keys  into environment.")
     
 get_telegram_secrets()
-API_ID_STR = os.environ.get("API_ID")
+API_ID = os.environ.get("API_ID")
 API_HASH_STR = os.environ.get("API_HASH")
-assert API_ID_STR is not None, "API_ID environment variable is not set after loading secrets"
+assert API_ID is not None, "API_ID environment variable is not set after loading secrets"
 assert API_HASH_STR is not None, "API_HASH environment variable is not set after loading secrets"
 
-API_ID = int(API_ID_STR)
 API_HASH: str = API_HASH_STR
 
 # --- CONFIGURE THESE ---
@@ -39,13 +38,46 @@ async def main():
     print("Starting session generation...")
     print("We will log in and then cache all your chats.")
 
-    # Start with a new, in-memory StringSession
-    async with TelegramClient(StringSession(), API_ID, API_HASH) as client:
-        print("\nPlease log in if prompted...")
+    # Use realistic device info to avoid Telegram blocking the login code
+    client = TelegramClient(
+        StringSession(),
+        int(API_ID),
+        API_HASH,
+        device_model="Desktop Linux",
+        system_version="Ubuntu 24.04",
+        app_version="5.11.0 x64",
+    )
 
-        # Check if already logged in (will be fast if you run this twice)
+    phone = input("Please enter your phone (or bot token): ").strip()
+    if not phone:
+        print("ERROR: No phone number entered. Exiting.")
+        return
+
+    await client.connect()
+
+    try:
+        # Explicitly send code request — more reliable than auto-login
+        sent = await client.send_code_request(phone)
+        print(f"✅ Verification code sent via {sent.type}. Check your Telegram app.")
+        print(f"   (Also check SMS inbox and the 'Telegram' service chat on all devices.)")
+
+        code = input("Enter the code you received: ").strip()
+        if not code:
+            print("ERROR: No code entered. Exiting.")
+            return
+
+        try:
+            await client.sign_in(phone, code)
+        except Exception as sign_in_error:
+            error_str = str(sign_in_error)
+            if "password" in error_str.lower() or "2fa" in error_str.lower():
+                password = input("2FA password required: ").strip()
+                await client.sign_in(password=password)
+            else:
+                raise
+
         me = await client.get_me()
-        print(f"Logged in as: {me.first_name}")
+        print(f"✅ Logged in as: {me.first_name} (@{me.username or 'no username'})")
 
         print("\nCaching all dialogs to find the target chat...")
 
@@ -53,29 +85,27 @@ async def main():
         target_id = NOTIFICATION_CHAT
 
         try:
-            # This loop forces the session to cache every chat's access hash
             async for dialog in client.iter_dialogs():
-                print(f"Caching: '{dialog.title}' (ID: {dialog.id})")
+                print(f"  Caching: '{dialog.title}' (ID: {dialog.id})")
                 if dialog.id == target_id:
-                    print(f"\n*** SUCCESS! Found and cached target group: {dialog.title} ***\n")
+                    print(f"\n  *** SUCCESS! Found and cached target group: {dialog.title} ***\n")
                     found_target_group = True
 
             if not found_target_group:
-                print("\n--- WARNING ---")
-                print(f"Finished all dialogs but did not find the target ID {target_id}.")
-                print("The session will work, but your function might fail.")
+                print(f"\n  --- WARNING: Target ID {target_id} not found in your dialogs ---")
             else:
-                print("Target chat was found and cached.")
+                print("  ✅ Target chat was found and cached.")
 
         except Exception as e:
-            print(f"An error occurred: {e}")
+            print(f"An error occurred while caching dialogs: {e}")
 
         finally:
-            # THIS IS THE MOST IMPORTANT PART
             print("\n--- Your New, Complete Session String ---")
-            print("Copy this entire string (it's very long):")
-            # This exports the session, including the auth key AND all the cached chat hashes
+            print("Copy this entire string (it's very long) and update it in Secret Manager:")
             print(client.session.save())
+
+    finally:
+        await client.disconnect()
 
 
 if __name__ == "__main__":

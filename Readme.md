@@ -98,6 +98,11 @@ Do **not** create `cursor_base` — the application will create it automatically
 
 The project uses Telethon's `StringSession` — a portable string that stores your Telegram authorization. **This is tied to your user Telegram account, not the bot.**
 
+> ⚠️ **CRITICAL: Use your phone number, NOT a bot token!**
+> When the script prompts `Please enter your phone (or bot token):`, you MUST enter your **phone number** (e.g., `+1234567890`).
+> A bot token will produce a session that **cannot** call `GetHistoryRequest` or `GetDialogsRequest` — the app will fail with `"The API access for bot users is restricted"`.
+> Bots are only used for **sending alert notifications** (step D); everything else (reading channel history, iterating dialogs) requires a **user** session.
+
 Run the included session generator:
 
 ```bash
@@ -293,6 +298,18 @@ The project is ready for Google Cloud.
 5. **Restart the application** — it will pick up the new session string on the next run.
 
 > **Tip**: To prevent accidental revocation in the future, you can rename the session in your Telegram app's active sessions list to something recognizable like "Telegram Parser Bot", so you know not to remove it.
+
+### "The API access for bot users is restricted" Error
+
+**Problem**: The app fails with:
+```
+The API access for bot users is restricted. The method you tried to invoke 
+cannot be executed as a bot (caused by GetHistoryRequest)
+```
+
+**Why this happens**: Your `session_string` was generated using a **bot token** instead of a **phone number**. Bots cannot call `GetHistoryRequest` or `GetDialogsRequest` — these require a **user** session. This app needs a user session to read channel history; the bot is only used for sending alert notifications.
+
+**Resolution**: Re-run `get_session.py` and enter your **phone number** (e.g., `+1234567890`) when prompted, NOT a bot token. Then update the `session_string` in Secret Manager with the new value (see [Recovering a Deleted Telegram Session](#recovering-a-deleted-telegram-session) above for the full procedure).
 
 ---
 
