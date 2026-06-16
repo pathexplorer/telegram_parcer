@@ -15,15 +15,18 @@ COUNT_ALERTS_SENT = 0
 
 async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, known_usernames_to_ids):
 
-    # # Initialization Firestore Client
-    fs = FirestoreMagic("firestore", "telegram")
-    # load_firejson = fs.load_firejson("keywords")
-    #
-    # KEYWORDS = fs.unpack_array_to_csv_string(load_firejson, "word")
-    # """ Return string in format "one,two,three" """
-    #
-    # TARGET_CHATS = fs.unpack_array_to_csv_string(load_firejson, "chats")
-    # """ Return string in format "one,two,three" """
+    # --- Initialize Firestore client for cursor_base ---
+    fs = FirestoreMagic("telegram", "cursor_base")
+
+    # --- Guard: validate inputs before entering the loop ---
+    if not TARGET_CHATS_LIST:
+        logger.critical("FATAL: TARGET_CHATS_LIST is empty. Nothing to scan.")
+        return
+    if not KEYWORDS_LIST:
+        logger.critical("FATAL: KEYWORDS_LIST is empty. Nothing to match.")
+        return
+    first_msg_date = None
+    last_msg_date = None
 
     async with TelegramClient(StringSession(session_string), API_ID, API_HASH,flood_sleep_threshold=60) as client:
         await client.start()
@@ -102,12 +105,15 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
         # 4. Upload to Firebase *ONCE* at the end, only if needed.
         if db_was_updated:
             logging.info("Database was updated, uploading to Firebase...")
-            fs.update_firejson("cursor_base", previous_checked_ids, True)
+            fs.set_firejson(previous_checked_ids, merge=True)
         else:
             logging.debug("No database changes detected.")
         # 5.
         for name, values in previous_checked_ids.items():
-            # Unpacking dict
+            # --- Guard: validate cursor entry structure ---
+            if not isinstance(values, (list, tuple)) or len(values) < 2:
+                logger.error("Corrupt entry for chat '%s': %s. Skipping.", name, values)
+                continue
             value0 = values[0]
             value1 = values[1]
 
@@ -140,9 +146,19 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 # Telethon is already doing it.
             except Exception as e:
                 logging.error(f"A different error: {e}")
+                continue  # skip this chat on error (e.g., bot account can't use GetHistoryRequest)
             db_was_updated = True # need to save our state
 
             newest_message_id = messages[0].id
+
+            last_acked_id = current_last_message_id  # fallback: don't advance cursor if no messages processed
+
+            # Track overall date range across all chats
+            if messages:
+                if first_msg_date is None or messages[-1].date < first_msg_date:
+                    first_msg_date = messages[-1].date  # oldest
+                if last_msg_date is None or messages[0].date > last_msg_date:
+                    last_msg_date = messages[0].date      # newest
 
             for message in reversed(messages):
                 global COUNT_PROCESSED_MESSAGES, COUNT_KEYWORD_MATCHES, COUNT_ALERTS_SENT
@@ -162,20 +178,26 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                             await send_alert(message, found_keywords)
                             logging.info(f"Alarm sent successfully for message ID: {message.id}")
                             COUNT_ALERTS_SENT += 1
+                            last_acked_id = message.id  # only advance cursor on success
                         except Exception as alert_e:
-                            # Log the specific error when sending the alert
-                            logging.error(f"❌ ERROR sending alert for Message ID {message.id}: {alert_e}")
-                            # Re-raise if necessary to stop the function, but logging is crucial
-                            #  to raise alert_e
+                            logging.error(f"❌ ERROR sending alert for Message ID {message.id}: {alert_e}. "
+                                          f"Cursor will NOT advance past this message — will retry on next run.")
                 else:
                     logging.debug(f"Message ID {message.id}: (Non-text message)")
 
-            previous_checked_ids[name][1] = newest_message_id
-        logging.info(f"--- Stats: Processed= {COUNT_PROCESSED_MESSAGES} | Matches= {COUNT_KEYWORD_MATCHES} | Alerts= {COUNT_ALERTS_SENT} ---")
+                # For non-keyword messages, advance cursor normally
+                if not message_text or not found_keywords:
+                    last_acked_id = message.id
+
+            previous_checked_ids[name][1] = last_acked_id
+        date_range = ""
+        if first_msg_date and last_msg_date:
+            date_range = f" | Range: {first_msg_date.strftime('%d.%m.%Y')} → {last_msg_date.strftime('%d.%m.%Y')}"
+        logging.info(f"--- Stats: Processed= {COUNT_PROCESSED_MESSAGES} | Matches= {COUNT_KEYWORD_MATCHES} | Alerts= {COUNT_ALERTS_SENT}{date_range} ---")
 
         # Save to Firebase *only* if there were changes
         if db_was_updated:
-            fs.update_firejson("cursor_base", previous_checked_ids, True)
+            fs.set_firejson(previous_checked_ids, merge=True)
             logging.debug(f"Saved previous_checked_ids to Firebase...: {previous_checked_ids}")
         else:
             logging.info("No new messages found in any chat. No DB update.")
