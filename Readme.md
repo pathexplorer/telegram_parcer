@@ -1,4 +1,5 @@
 # Telegram Parser
+![telegram_parcer](cover.webp)
 
 ## Overview
 
