@@ -1,0 +1,31 @@
+[project]
+name = "telegram-parcer"
+version = "0.1.0"
+description = "Telegram monitoring tool — scans public channels for keywords and sends alerts"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv",
+    "telethon",
+    "google-cloud-secret-manager",
+    "google-cloud-firestore",
+    "google-cloud-storage",
+    "google-cloud-logging",
+    "flask",
+    "aiohttp",
+    "gcp-actions",
+]
+
+# ── uv-specific: where to find gcp-actions ──
+[tool.uv.sources]
+gcp-actions = { path = "../gcp_actions", editable = true }
+
+# ── Private PyPI mirror (Artifact Registry) ──
+[[tool.uv.index]]
+name = "bike-data-magic"
+url = "https://us-central1-python.pkg.dev/handy-cache-476919-t4/bike-data-magic/simple/"
+explicit = true
+
+# Fallback to public PyPI
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
