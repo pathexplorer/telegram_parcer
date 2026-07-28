@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"name": "telegram_parcer",
+			"path": "."
+		},
+		{
+			"name": "gcp_actions",
+			"path": "../gcp_actions"
+		}
+	],
+	"settings": {
+		"python.analysis.extraPaths": [
+			"../gcp_actions"
+		]
+	}
+}
