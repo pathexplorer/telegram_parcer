@@ -7,7 +7,7 @@
 --extra-index-url https://pypi.org/simple
 
 #gcp_actions==0.2.2
--e /home/stas/mega/projects/gcp_actions
+-e /home/stas/projects/main/gcp_actions
 python-dotenv
 telethon
 google-cloud-secret-manager

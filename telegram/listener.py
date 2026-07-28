@@ -125,9 +125,41 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
 
             await asyncio.sleep(2)  # Delay for stability
 
-            # B. Get actual state
+            # B. Resolve entity — try username first, fall back to numeric ID.
+            #    This handles groups that changed their @username or went private.
             try:
                 entity = await client.get_entity(value0)
+            except ValueError:
+                logging.warning(
+                    f"Username '{value0}' not found for chat {chat_id_str} "
+                    f"(group may have lost its public username or gone private). "
+                    f"Trying by numeric ID..."
+                )
+                try:
+                    entity = await client.get_entity(int(chat_id_str))
+                except Exception as e2:
+                    logging.error(
+                        f"Cannot resolve chat {chat_id_str} by numeric ID either: {e2}. Skipping."
+                    )
+                    continue
+                # Update stored reference: new username if available, else use numeric ID
+                new_username = getattr(entity, 'username', None)
+                if new_username:
+                    new_ref = f"@{new_username}"
+                    logging.info(
+                        f"Chat {chat_id_str} renamed from '{value0}' to '{new_ref}'. Updating cursor."
+                    )
+                    values[0] = new_ref
+                else:
+                    logging.info(
+                        f"Chat {chat_id_str} ('{entity.title}') has no public username. "
+                        f"Will resolve by numeric ID from now on."
+                    )
+                    values[0] = str(chat_id_str)
+                db_was_updated = True
+
+            # C. Get actual messages
+            try:
                 messages = await client.get_messages(entity, min_id=current_last_message_id, limit=None)
                 """ Result: 
                         1. empty space if no new
@@ -140,12 +172,9 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     continue
                 logging.debug(f"Fetched {len(messages)} new messages.")
             except FloodWaitError as e:
-                # This code runs, but Telethon is *also* sleeping
                 logging.critical(f"We hit a flood wait for {e.seconds} seconds. My bot is too fast!")
-                # No need to add 'await asyncio.sleep(e.seconds)',
-                # Telethon is already doing it.
             except Exception as e:
-                logging.error(f"A different error: {e}")
+                logging.error(f"Failed to fetch messages for '{value0}' (chat {chat_id_str}): {e}")
                 continue  # skip this chat on error (e.g., bot account can't use GetHistoryRequest)
             db_was_updated = True # need to save our state
 
