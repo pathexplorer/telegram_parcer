@@ -237,6 +237,9 @@ The project is ready for Google Cloud.
 - **Runtime**: Python 3.11
 - Ensure the Service Account used has permissions for **Firestore User** and **Secret Manager Secret Accessor**.
 
+### Emergency Cursor Reset
+See **[Emergency Tools](#emergency-tools)** below for the `reset_cursors` utility.
+
 ## Directory Structure
 - `main.py`: Entry point. Initializes config and runs the poller.
 - `telegram/`: Core logic.
@@ -244,7 +247,66 @@ The project is ready for Google Cloud.
   - `starter_conf.py`: Loads initial configuration from Firestore.
   - `send.py`: Handles sending alerts.
 - `project_env/`: Configuration loaders.
+- `emergency/`: Emergency tools (cursor reset, diagnostics).
+  - `reset_cursors.py`: Fast-forwards all chat cursors to "now".
 - `requirements.txt`: Python dependencies.
+
+---
+
+## Emergency Tools
+
+### `reset_cursors` — "Parse from Current Moment"
+
+When you need to skip all backlog and start monitoring **from now**, use the emergency cursor-reset tool. It scans every tracked chat, records the latest message ID in each, shows a diff against the current stored cursor, and — if confirmed — updates Firestore so future polling sees nothing to catch up on.
+
+**Use cases:**
+- You added many new channels and don't want to process thousands of old messages.
+- Cursors got corrupted (e.g., a wrong placeholder value was propagated).
+- You want a clean "start fresh from today" without deleting any data.
+
+**Usage (local):**
+```bash
+# Dry-run — scan & print results only, NEVER write to Firestore
+uv run python -m emergency.reset_cursors --dry-run
+
+# Interactive — asks y/n before updating cursors
+uv run python -m emergency.reset_cursors
+
+# Non-interactive — auto-confirm (useful for scripts/CI)
+uv run python -m emergency.reset_cursors --yes
+
+# Shortcut
+uv run python -m emergency --dry-run
+```
+
+**Sample output (dry-run):**
+```
+================================================================================
+  🔍  EMERGENCY CURSOR SCAN RESULTS
+  Scanned at: 2026-07-28 21:04:54 UTC
+================================================================================
+Chat                           ID              Old cursor     Latest  Status
+--------------------------------------------------------------------------------
+MyChannel                       1234567890            340        568  📩 +228 new
+AnotherGroup                    9876543210              0        120  ⛳ NEW  (0 → 120)
+AlreadyFresh                    1111111111            445        445  ✅ up-to-date
+StaleChat                       2222222222          102974       9127  ⚠️  STALE (cursor ahead by 93847)
+--------------------------------------------------------------------------------
+  New chats (no cursor): 1
+  Behind (will advance):  1
+  Already up-to-date:     1
+  Errors/skipped:         1
+================================================================================
+```
+
+**Status legend:**
+| Icon | Meaning |
+|------|---------|
+| 📩 +N new | Chat has new messages since last cursor — will advance. |
+| ✅ up-to-date | Cursor already matches latest message. |
+| ⛳ NEW | Chat has no cursor yet — first-time tracking. |
+| ⚠️ STALE | Stored cursor is **ahead** of the latest message (likely a corrupted/bad seed value). Will be reset to actual latest. |
+| ⏳ skipped | Rate-limited by Telegram — retry later. |
 
 ---
 
