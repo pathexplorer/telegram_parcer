@@ -34,7 +34,12 @@ async def send_bot_notification(text_message):
 async def send_alert(message, keywords_found):
     chat_entity = await message.get_chat()
     # Safely get a chat identifier (username is preferred, then title, then a string ID)
-    chat_identifier = chat_entity.username or chat_entity.title or str(chat_entity.id)
+    chat_identifier = (
+        chat_entity.username
+        or getattr(chat_entity, 'title', None)
+        or getattr(chat_entity, 'first_name', None)
+        or str(chat_entity.id)
+    )
     message_link = f"https://t.me/c/{chat_entity.id}/{message.id}"
     alert_message = (
         f"🚨 **KEYWORD ALERT!** 🚨\n"

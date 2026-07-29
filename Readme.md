@@ -9,11 +9,13 @@ Key features:
 
 - **Keyword Monitoring**: Scans messages for specific keywords.
 
-- **State Management**: Tracks the last checked message ID for each channel in **Google Cloud Firestore**, ensuring no messages are missed or processed twice (idempotency).
+- **State Management**: Tracks the last checked message ID for each channel in **Google Cloud Firestore**, ensuring no messages are missed or processed twice (idempotency). Cursor is saved after **each chat** (not just at the end) to minimize data loss on interruption.
 
 - **Dynamic Configuration**: Channel lists and keywords are managed in Firestore, allowing updates without redeploying the code.
 
 - **Secure**: Credentials and secrets are managed via **Google Secret Manager**.
+
+- **Graceful Shutdown**: Handles `SIGINT` (Ctrl+C) and `SIGTERM` (Cloud Run timeout) — saves cursor state before exiting. Supports an optional time limit (`MAX_POLL_SECONDS`) to avoid Telegram flood blocks on long runs.
 
 ## Architecture
 
@@ -32,7 +34,7 @@ Key features:
 4.  **Processing**: It fetches messages newer than the last checked ID.
 5.  **Matching**: Checks message content against keywords.
 6.  **Alerting**: Sends an alert to the `NOTIFICATION_CHAT` if a match is found.
-7.  **State Update**: Updates Firestore with the new "last checked ID".
+7.  **State Update**: Updates Firestore with the new "last checked ID" **after each chat** (incremental persistence). On shutdown (signal, timeout, or flood-wait), the cursor is saved immediately so the next run resumes from the last safely-acked position.
 
 ## Setup & Installation
 
@@ -217,6 +219,8 @@ Create a `keys.env` file in the project root for local development:
 PROJECT_ID=your-gcp-project-id
 TELEGRAM_SECRETS=telegram-secrets
 NOTIFICATION_CHAT=-1001234567890
+# Optional: max seconds per poll run (avoids Telegram flood blocks)
+MAX_POLL_SECONDS=120
 ```
 *replace `telegram-secrets` with the actual name of your secret in GCP.*
 
@@ -237,8 +241,38 @@ The project is ready for Google Cloud.
 - **Runtime**: Python 3.11
 - Ensure the Service Account used has permissions for **Firestore User** and **Secret Manager Secret Accessor**.
 
-### Emergency Cursor Reset
-See **[Emergency Tools](#emergency-tools)** below for the `reset_cursors` utility.
+### Graceful Shutdown & Time-Limited Polling
+
+The poller supports **safe interruption** — whether you press Ctrl+C locally or Cloud Run sends `SIGTERM`, the cursor is saved to Firestore before the process exits. The next run resumes from the last saved position with **no duplicate alerts** and **no lost progress**.
+
+#### How it works
+
+- **Ctrl+C (SIGINT)** or **Cloud Run timeout (SIGTERM)** → sets an internal shutdown flag.
+- The polling loop checks this flag **between chats** and **after each message** inside a chat.
+- On shutdown, the cursor for the current chat (and all previous chats) is saved immediately.
+- Cursor is already saved **per-chat** during normal operation, so only the current chat's in-flight messages may be re-scanned on restart.
+
+#### Time-limited runs (`MAX_POLL_SECONDS`)
+
+To avoid Telegram's flood-block system during very long polling runs, set a maximum runtime:
+
+```bash
+# Run for at most 120 seconds, then save cursor and exit
+MAX_POLL_SECONDS=120 python main.py
+```
+
+```bash
+# Unlimited — runs until all messages are processed (or interrupted)
+python main.py
+```
+
+When the time limit is reached, the current message loop finishes its iteration, the cursor is saved, and the process exits cleanly. On Cloud Functions/Cloud Run, set the env var in your deployment:
+
+```yaml
+--set-env-vars=...,MAX_POLL_SECONDS=120
+```
+
+> **Tip**: If Telegram returns a `FloodWaitError` (wait > 60 s), the poller **saves the cursor immediately and exits** rather than waiting and risking a Cloud Function timeout.
 
 ## Directory Structure
 - `main.py`: Entry point. Initializes config and runs the poller.
@@ -247,66 +281,7 @@ See **[Emergency Tools](#emergency-tools)** below for the `reset_cursors` utilit
   - `starter_conf.py`: Loads initial configuration from Firestore.
   - `send.py`: Handles sending alerts.
 - `project_env/`: Configuration loaders.
-- `emergency/`: Emergency tools (cursor reset, diagnostics).
-  - `reset_cursors.py`: Fast-forwards all chat cursors to "now".
 - `requirements.txt`: Python dependencies.
-
----
-
-## Emergency Tools
-
-### `reset_cursors` — "Parse from Current Moment"
-
-When you need to skip all backlog and start monitoring **from now**, use the emergency cursor-reset tool. It scans every tracked chat, records the latest message ID in each, shows a diff against the current stored cursor, and — if confirmed — updates Firestore so future polling sees nothing to catch up on.
-
-**Use cases:**
-- You added many new channels and don't want to process thousands of old messages.
-- Cursors got corrupted (e.g., a wrong placeholder value was propagated).
-- You want a clean "start fresh from today" without deleting any data.
-
-**Usage (local):**
-```bash
-# Dry-run — scan & print results only, NEVER write to Firestore
-uv run python -m emergency.reset_cursors --dry-run
-
-# Interactive — asks y/n before updating cursors
-uv run python -m emergency.reset_cursors
-
-# Non-interactive — auto-confirm (useful for scripts/CI)
-uv run python -m emergency.reset_cursors --yes
-
-# Shortcut
-uv run python -m emergency --dry-run
-```
-
-**Sample output (dry-run):**
-```
-================================================================================
-  🔍  EMERGENCY CURSOR SCAN RESULTS
-  Scanned at: 2026-07-28 21:04:54 UTC
-================================================================================
-Chat                           ID              Old cursor     Latest  Status
---------------------------------------------------------------------------------
-MyChannel                       1234567890            340        568  📩 +228 new
-AnotherGroup                    9876543210              0        120  ⛳ NEW  (0 → 120)
-AlreadyFresh                    1111111111            445        445  ✅ up-to-date
-StaleChat                       2222222222          102974       9127  ⚠️  STALE (cursor ahead by 93847)
---------------------------------------------------------------------------------
-  New chats (no cursor): 1
-  Behind (will advance):  1
-  Already up-to-date:     1
-  Errors/skipped:         1
-================================================================================
-```
-
-**Status legend:**
-| Icon | Meaning |
-|------|---------|
-| 📩 +N new | Chat has new messages since last cursor — will advance. |
-| ✅ up-to-date | Cursor already matches latest message. |
-| ⛳ NEW | Chat has no cursor yet — first-time tracking. |
-| ⚠️ STALE | Stored cursor is **ahead** of the latest message (likely a corrupted/bad seed value). Will be reset to actual latest. |
-| ⏳ skipped | Rate-limited by Telegram — retry later. |
 
 ---
 
