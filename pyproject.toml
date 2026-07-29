@@ -2,7 +2,7 @@
 name = "telegram-parcer"
 version = "0.1.0"
 description = "Telegram monitoring tool — scans public channels for keywords and sends alerts"
-requires-python = ">=3.11"
+requires-python = "==3.12.*"
 dependencies = [
     "python-dotenv",
     "telethon",

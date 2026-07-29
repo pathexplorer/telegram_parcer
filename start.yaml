@@ -1,0 +1,30 @@
+substitutions:
+  _FUNCTION_NAME: telegramPoller
+  _REGION: us-central1
+  _SERVICE_ACCOUNT: tele-looker-wizard@handy-cache-476919-t4.iam.gserviceaccount.com
+  _RUNTIME: python312
+  _TELEGRAM_SECRETS: "telegram-secrets"
+  _TAG_NAME: v3.0.0
+  _GCP_PROJECT_ID: "handy-cache-476919-t4"
+  _LOGGING_LEVEL: INFO
+
+steps:
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  args:
+  - gcloud
+  - functions
+  - deploy
+  - $_FUNCTION_NAME
+  - --region=$_REGION
+  - --source=.
+  - --entry-point=main
+  - --runtime=$_RUNTIME
+  - --trigger-http
+  - --memory=512MB
+  - --allow-unauthenticated
+  - --service-account=$_SERVICE_ACCOUNT
+  - --set-env-vars=GCP_PROJECT_ID=$_GCP_PROJECT_ID,CODE_VERSION=$_TAG_NAME,TELEGRAM_SECRETS=$_TELEGRAM_SECRETS,LOGGING_LEVEL=$_LOGGING_LEVEL
+  allow_exit_codes:
+    - 0  # Allow success
+    - 1  # Allow the non-critical failure code
+timeout: '1600s'
