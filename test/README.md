@@ -26,7 +26,7 @@ uv run diagnose 1511100059
 ## What It Checks
 
 | Step | Description |
-|------|-------------|
+| ---- | ----------- |
 | A. Session | Is the Telethon session still valid? |
 | B. Dialog Cache | How many dialogs does the account have? |
 | C. Username Resolution | Can `@handle` be resolved via `get_entity`? |

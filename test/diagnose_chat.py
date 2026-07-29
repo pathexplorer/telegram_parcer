@@ -190,7 +190,7 @@ async def _step_numeric_resolution(
         return base
 
 
-async def _step_fetch_messages(client, msg_peer, limit: int = 5) -> dict:
+async def _step_fetch_messages(client, msg_peer, limit: int = 10) -> dict:
     """Fetch the last *limit* messages using the resolved InputPeer."""
     try:
         messages = await client.get_messages(msg_peer, limit=limit)
@@ -305,7 +305,7 @@ async def diagnose(chat_ref: str) -> int:
             print(f"     Error   : {n.get('error', '?')}")
 
         # ---- Step E: Fetch last messages ----
-        _header("E. Message Fetch (last 5)")
+        _header("E. Message Fetch (last 10)")
         # Prefer numeric resolution peer; fall back to username entity
         if msg_peer is None and u.get("ok"):
             try:
@@ -319,7 +319,7 @@ async def diagnose(chat_ref: str) -> int:
         if msg_peer is None:
             print(f"  {_ok(False)} No valid peer to fetch messages from.")
         else:
-            m = await _step_fetch_messages(client, msg_peer, limit=5)
+            m = await _step_fetch_messages(client, msg_peer, limit=10)
             if m["ok"]:
                 reachable = True
                 print(f"  {_ok(True)} Fetched {m['count']} message(s) "
