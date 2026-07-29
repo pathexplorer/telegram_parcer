@@ -127,8 +127,10 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
 
             # B. Resolve entity — try username first, fall back to numeric ID.
             #    This handles groups that changed their @username or went private.
+            logging.info(f"🔍 [1/3] Resolving entity for '{value0}' (chat {chat_id_str})...")
             try:
                 entity = await client.get_entity(value0)
+                logging.info(f"✅ [1/3] Entity resolved: title='{entity.title}', type={type(entity).__name__}")
             except ValueError:
                 logging.warning(
                     f"Username '{value0}' not found for chat {chat_id_str} "
@@ -137,6 +139,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 )
                 try:
                     entity = await client.get_entity(int(chat_id_str))
+                    logging.info(f"✅ [1/3] Entity resolved by numeric ID: title='{entity.title}'")
                 except Exception as e2:
                     logging.error(
                         f"Cannot resolve chat {chat_id_str} by numeric ID either: {e2}. Skipping."
@@ -160,6 +163,9 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
 
             # C. Get actual messages
             try:
+                # --- First, peek at how many messages we're about to fetch ---
+                logging.info(f"📥 [2/3] Fetching messages for '{value0}' (chat {chat_id_str}) since ID {current_last_message_id} (limit=None = ALL)...")
+                logging.info(f"⏳ [2/3] This may take a LONG time if there are many new messages. Waiting for Telethon response...")
                 messages = await client.get_messages(entity, min_id=current_last_message_id, limit=None)
                 """ Result: 
                         1. empty space if no new
@@ -170,7 +176,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 if not messages:
                     logging.debug("No new messages found.")
                     continue
-                logging.debug(f"Fetched {len(messages)} new messages.")
+                logging.info(f"✅ [2/3] Fetched {len(messages)} new messages (IDs {messages[-1].id} → {messages[0].id}).")
             except FloodWaitError as e:
                 logging.critical(f"We hit a flood wait for {e.seconds} seconds. My bot is too fast!")
             except Exception as e:
