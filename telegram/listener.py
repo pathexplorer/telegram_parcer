@@ -109,6 +109,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
         else:
             logging.debug("No database changes detected.")
         # 5.
+        cursors_to_write: dict[str, int] = {}  # track per-chat new cursor values for cross-contam detection
         for name, values in previous_checked_ids.items():
             # --- Guard: validate cursor entry structure ---
             if not isinstance(values, (list, tuple)) or len(values) < 2:
@@ -224,11 +225,80 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 if not message_text or not found_keywords:
                     last_acked_id = message.id
 
+            # --- Cursor sanity guards ---
+            if last_acked_id > newest_message_id:
+                logger.critical(
+                    "CURSOR GUARD: computed cursor %d exceeds newest message %d "
+                    "for chat '%s' (%s). Refusing to advance — keeping %d.",
+                    last_acked_id, newest_message_id, value0, name, current_last_message_id
+                )
+                try:
+                    from telegram.send import send_bot_notification
+                    await send_bot_notification(
+                        f"⚠️ **CURSOR GUARD TRIGGERED**\n"
+                        f"Chat: `{value0}` (`{name}`)\n"
+                        f"Computed cursor ({last_acked_id}) > newest message ({newest_message_id})\n"
+                        f"Cursor NOT advanced — kept at {current_last_message_id}"
+                    )
+                except Exception as alert_e:
+                    logger.error("Failed to send cursor guard alert: %s", alert_e)
+                last_acked_id = current_last_message_id
+
+            if last_acked_id < current_last_message_id:
+                logger.warning(
+                    "CURSOR GUARD: computed cursor %d is LESS than current cursor %d "
+                    "for chat '%s' (%s). May indicate cross-contamination. Keeping current cursor.",
+                    last_acked_id, current_last_message_id, value0, name
+                )
+                last_acked_id = current_last_message_id
+
             previous_checked_ids[name][1] = last_acked_id
+            cursors_to_write[name] = last_acked_id
         date_range = ""
         if first_msg_date and last_msg_date:
             date_range = f" | Range: {first_msg_date.strftime('%d.%m.%Y')} → {last_msg_date.strftime('%d.%m.%Y')}"
         logging.info(f"--- Stats: Processed= {COUNT_PROCESSED_MESSAGES} | Matches= {COUNT_KEYWORD_MATCHES} | Alerts= {COUNT_ALERTS_SENT}{date_range} ---")
+
+        # --- Cross-contamination detection before saving ---
+        if db_was_updated and cursors_to_write:
+            cursor_to_chats: dict[int, list[str]] = {}
+            for chat_id, cursor_val in cursors_to_write.items():
+                cursor_to_chats.setdefault(cursor_val, []).append(chat_id)
+
+            duplicate_cursors = {
+                val: chats for val, chats in cursor_to_chats.items() if len(chats) > 1
+            }
+            if duplicate_cursors:
+                logger.critical(
+                    "CROSS-CONTAMINATION DETECTED: %d cursor value(s) shared by multiple chats: %s. "
+                    "Aborting save to protect cursor_base.",
+                    len(duplicate_cursors),
+                    {str(v): [str(c) for c in chats] for v, chats in duplicate_cursors.items()}
+                )
+                try:
+                    from telegram.send import send_bot_notification
+                    detail_lines = []
+                    for val, chats in duplicate_cursors.items():
+                        chat_list = ", ".join(f"`{c}`" for c in chats)
+                        detail_lines.append(f"• Cursor `{val}` shared by: {chat_list}")
+                    await send_bot_notification(
+                        f"🚨 **CROSS-CONTAMINATION DETECTED**\n"
+                        f"Multiple chats would get the same cursor value:\n"
+                        + "\n".join(detail_lines) +
+                        f"\n\nSave **ABORTED** — cursor_base was NOT updated."
+                    )
+                except Exception as alert_e:
+                    logger.error("Failed to send cross-contam alert: %s", alert_e)
+                db_was_updated = False  # abort the save
+
+        # --- Backup cursor_base before writing ---
+        if db_was_updated:
+            logger.info("Creating backup of cursor_base before saving...")
+            try:
+                fs.backup_document()
+                fs.prune_old_backups(max_backups=30)
+            except Exception as e:
+                logger.error("Backup failed (non-fatal): %s. Proceeding with save.", e)
 
         # Save to Firebase *only* if there were changes
         if db_was_updated:
