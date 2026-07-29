@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "telegram-parcer"
-version = "0.1.0"
+version = "1.0.0"
 description = "Telegram monitoring tool — scans public channels for keywords and sends alerts"
 requires-python = "==3.12.*"
 dependencies = [
@@ -14,6 +18,9 @@ dependencies = [
     "aiohttp",
     "gcp-actions",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
 
 # ── uv-specific: where to find gcp-actions ──
 [tool.uv.sources]
@@ -29,3 +36,6 @@ explicit = true
 [[tool.uv.index]]
 name = "pypi"
 url = "https://pypi.org/simple"
+
+[tool.setuptools.packages.find]
+include = ["telegram*", "emergency*", "project_env*", "tests*"]

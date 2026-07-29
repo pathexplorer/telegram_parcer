@@ -52,6 +52,7 @@ def _make_secret_manager_mock() -> MagicMock:
         "API_HASH": "abc123hash",
         "session_string": "1AZT_mock_session",
         "BOT_TOKEN": "123:mock_bot_token",
+        "NOTIFICATION_CHAT": "-1001234567890",
     }
     return sm
 
