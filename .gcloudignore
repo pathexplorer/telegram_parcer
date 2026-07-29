@@ -1,0 +1,42 @@
+# ── Git ──
+.git
+.gitignore
+
+# ── Python artifacts ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# ── Virtual environments ──
+.venv/
+.venv1/
+venv/
+
+# ── Secrets & local config (KEEP OUT OF CLOUD BUILD) ──
+keys.env
+*.key.json
+*.pem
+
+# ── Tests (not needed at runtime) ──
+test/
+tests/
+
+# ── IDE / Editor ──
+.vscode/
+.idea/
+*.code-workspace
+
+# ── Docs & Images ──
+*.md
+*.webp
+!Readme.md
+
+# ── Lock files (unused by Cloud Functions) ──
+uv.lock
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
