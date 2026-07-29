@@ -50,30 +50,141 @@ def _fmt_gap(old: int, new: int) -> str:
     return f"📩 +{diff} new"
 
 
-async def _resolve_entity(client: TelegramClient, chat_ref: str) -> Tuple[object, str]:
+def _safe_title(entity) -> str:
+    """Return a human-readable title for any Telethon entity type."""
+    title = getattr(entity, 'title', None)
+    if title:
+        return title
+    first = getattr(entity, 'first_name', None)
+    if first:
+        last = getattr(entity, 'last_name', None)
+        return f"{first} {last}".strip() if last else first
+    return str(getattr(entity, 'id', 'Unknown'))
+
+
+async def _build_dialog_cache(client: TelegramClient) -> dict:
+    """Iterate all dialogs and return {dialog_id: Dialog}."""
+    cache: dict = {}
+    try:
+        async for dialog in client.iter_dialogs():
+            cache[dialog.id] = dialog
+        logger.info("📇 Cached %d dialogs.", len(cache))
+    except Exception as exc:
+        logger.warning("⚠️  Could not build dialog cache: %s", exc)
+    return cache
+
+
+def _lookup_dialog(numeric_id_str: str, cache: dict):
+    """Look up a Dialog in the cache by public numeric ID.
+
+    Telethon entity.id is the positive public ID (e.g. 1511100059),
+    dialog.id uses internal peer IDs (e.g. -1001511100059 for supergroups).
+    We try all common formats.
     """
-    Resolve a chat entity.
+    nid = int(numeric_id_str)
+    for candidate in (nid, -nid, int(f"-100{numeric_id_str}")):
+        dlg = cache.get(candidate)
+        if dlg is not None:
+            return dlg
+    return None
+
+
+async def _resolve_entity(
+    client: TelegramClient,
+    chat_ref: str,
+    dialog_cache: dict,
+    known_usernames_to_ids: dict,
+) -> tuple:
+    """Resolve a chat entity using the best available method.
+
+    Strategy (in order):
+      1. Numeric ref → dialog cache (has access_hash, works for private groups)
+      2. Username ref → get_entity, but verify it's a channel/group, not a User
+      3. Username ref fails or resolves to User → look up in known_usernames_to_ids
+         to find the numeric ID, then try dialog cache
+      4. Last resort → get_entity(int(chat_ref))
+
     Returns (entity, chat_id_str).
-    Falls back to numeric ID if username lookup fails.
     """
+    is_numeric = chat_ref.isdigit()
+
+    # --- Path A: numeric ref → dialog cache first ---
+    if is_numeric:
+        dlg = _lookup_dialog(chat_ref, dialog_cache)
+        if dlg is not None:
+            entity = dlg.entity
+            logger.info("Resolved numeric ID %s via dialog cache → '%s'.",
+                        chat_ref, _safe_title(entity))
+            return entity, str(entity.id)
+        # Fallback: try get_entity (may lack access_hash but worth a shot)
+        logger.warning("Numeric ID %s not in dialog cache, trying get_entity…", chat_ref)
+        try:
+            entity = await client.get_entity(int(chat_ref))
+            return entity, str(entity.id)
+        except Exception as e:
+            raise ValueError(
+                f"Cannot resolve numeric ID '{chat_ref}' via dialog cache or get_entity: {e}"
+            ) from e
+
+    # --- Path B: username ref ---
     try:
         entity = await client.get_entity(chat_ref)
     except ValueError:
-        logger.warning("Username '%s' not found, trying numeric ID.", chat_ref)
-        try:
-            entity = await client.get_entity(int(chat_ref))
-        except Exception as e2:
-            raise ValueError(f"Cannot resolve '{chat_ref}' by any method: {e2}") from e2
+        # Username not found at all — try to find numeric ID from known_usernames_to_ids
+        logger.warning("Username '%s' not found, looking up in known_usernames_to_ids…", chat_ref)
+        numeric_id = known_usernames_to_ids.get(chat_ref)
+        if numeric_id:
+            dlg = _lookup_dialog(numeric_id, dialog_cache)
+            if dlg is not None:
+                entity = dlg.entity
+                logger.info("Resolved '%s' → numeric ID %s via dialog cache → '%s'.",
+                            chat_ref, numeric_id, _safe_title(entity))
+                return entity, str(entity.id)
+        raise ValueError(
+            f"Username '{chat_ref}' not found and no numeric ID in cursor. "
+            f"Account may have lost access."
+        )
+
+    # If get_entity succeeded, verify it's a channel/group, not a User that
+    # grabbed the old handle after the chat went private.
+    if not hasattr(entity, 'title'):
+        logger.warning(
+            "Username '%s' resolved to a %s (id=%s) instead of a channel/group. "
+            "The handle may have been reassigned. Looking up by known numeric ID…",
+            chat_ref, type(entity).__name__, entity.id)
+        numeric_id = known_usernames_to_ids.get(chat_ref)
+        if numeric_id:
+            dlg = _lookup_dialog(numeric_id, dialog_cache)
+            if dlg is not None:
+                entity = dlg.entity
+                logger.info("Resolved '%s' → numeric ID %s via dialog cache → '%s'.",
+                            chat_ref, numeric_id, _safe_title(entity))
+                return entity, str(entity.id)
+        raise ValueError(
+            f"Username '{chat_ref}' resolved to User (id={entity.id}), "
+            f"and no matching cursor entry found for numeric fallback."
+        )
+
     return entity, str(entity.id)
 
 
 async def _get_latest_message_id(client: TelegramClient, entity: object) -> int:
-    """Return the latest message ID for an entity, or 0 if empty."""
+    """Return the latest message ID for an entity, or 0 if empty.
+
+    Uses get_input_entity(entity) to obtain a proper InputPeer with access_hash,
+    which is essential for private groups/channels.
+    """
     try:
-        msgs = await client.get_messages(entity, limit=1)
+        msg_peer = await client.get_input_entity(entity)
+        msgs = await client.get_messages(msg_peer, limit=1)
     except FloodWaitError as e:
-        logger.warning("FloodWait %ds for %s — skipping.", e.seconds, getattr(entity, 'title', entity))
+        logger.warning("FloodWait %ds for %s — skipping.",
+                       e.seconds, _safe_title(entity))
         return -1  # sentinel: couldn't fetch
+    except Exception as e:
+        logger.warning("Could not fetch messages for '%s': %s",
+                       _safe_title(entity), e)
+        return -1
     return msgs[0].id if msgs else 0
 
 
@@ -131,17 +242,79 @@ async def scan_and_optionally_reset(
         await client.start()
         logger.info("✅ Connected to Telegram.")
 
+        # --- 3b. Build dialog cache (essential for private-group resolution) ---
+        dialog_cache = await _build_dialog_cache(client)
+
         # --- 4. Scan every chat --------------------------------------------
         results: List[Dict] = []  # list of per-chat rows
 
-        for chat_ref in TARGET_CHATS_LIST:
-            logger.info("Scanning chat: %s", chat_ref)
+        # Track which chats we've already scanned (by numeric ID) to avoid
+        # duplicates when a chat appears both in TARGET_CHATS_LIST (as @username)
+        # and in previous_checked_ids (as numeric ID).
+        scanned_ids: set = set()
 
-            # Resolve entity
+        # --- 4a. Scan cursor entries first (authoritative numeric IDs) -------
+        for chat_id_str, values in previous_checked_ids.items():
+            if not isinstance(values, (list, tuple)) or len(values) < 2:
+                logger.warning("Corrupt cursor entry '%s': %s — skipping.", chat_id_str, values)
+                continue
+            stored_ref = values[0]
+            old_cursor = values[1]
+
+            logger.info("Scanning chat (cursor): ID=%s ref='%s'", chat_id_str, stored_ref)
+
+            # Resolve by numeric ID via dialog cache
+            dlg = _lookup_dialog(chat_id_str, dialog_cache)
+            if dlg is None:
+                # Not in dialog cache — don't mark as scanned so Phase 4b
+                # can retry via @username (get_entity) from TARGET_CHATS_LIST.
+                logger.warning("Chat ID %s not in dialog cache — will retry via TARGET_CHATS_LIST.", chat_id_str)
+                continue
+
+            entity = dlg.entity
+            scanned_ids.add(chat_id_str)  # mark successful resolution
+            title = _safe_title(entity)
+
+            # Latest message on Telegram (uses get_input_entity for proper access_hash)
+            latest_id = await _get_latest_message_id(client, entity)
+
+            if latest_id == -1:
+                results.append({
+                    "ref": stored_ref,
+                    "id": chat_id_str,
+                    "title": title,
+                    "old_cursor": old_cursor,
+                    "latest": "Error/FloodWait",
+                    "gap": "⏳ skipped (error or rate-limit)",
+                })
+                continue
+
+            gap = _fmt_gap(old_cursor, latest_id)
+            results.append({
+                "ref": stored_ref,
+                "id": chat_id_str,
+                "title": title,
+                "old_cursor": old_cursor,
+                "latest": latest_id,
+                "gap": gap,
+                "_chat_id_str": chat_id_str,
+                "_chat_ref": stored_ref,
+                "_latest_id": latest_id,
+            })
+            await asyncio.sleep(1.5)
+
+        # --- 4b. Scan TARGET_CHATS_LIST for NEW chats (not yet in cursor) ---
+        for chat_ref in TARGET_CHATS_LIST:
+            # Try to resolve and see if it's a new chat we haven't scanned
             try:
-                entity, chat_id_str = await _resolve_entity(client, chat_ref)
+                entity, chat_id_str = await _resolve_entity(
+                    client, chat_ref, dialog_cache, known_usernames_to_ids
+                )
             except Exception as e:
                 logger.error("❌ Could not resolve '%s': %s", chat_ref, e)
+                # Only report if not already scanned via cursor
+                if chat_ref.isdigit() and chat_ref in scanned_ids:
+                    continue  # already handled above
                 results.append({
                     "ref": chat_ref,
                     "id": "?",
@@ -152,13 +325,16 @@ async def scan_and_optionally_reset(
                 })
                 continue
 
-            title = getattr(entity, 'title', chat_ref)
-            # Current stored cursor (may not exist yet)
+            if chat_id_str in scanned_ids:
+                continue  # already handled in cursor scan
+            scanned_ids.add(chat_id_str)
+
+            title = _safe_title(entity)
             old_entry = previous_checked_ids.get(chat_id_str)
             old_cursor = old_entry[1] if old_entry else 0
-            old_ref = old_entry[0] if old_entry else "—"
 
-            # Latest message on Telegram
+            logger.info("Scanning chat (new): ref='%s' id=%s title='%s'", chat_ref, chat_id_str, title)
+
             latest_id = await _get_latest_message_id(client, entity)
 
             if latest_id == -1:
@@ -167,8 +343,8 @@ async def scan_and_optionally_reset(
                     "id": chat_id_str,
                     "title": title,
                     "old_cursor": old_cursor,
-                    "latest": "FloodWait",
-                    "gap": "⏳ skipped (rate-limit)",
+                    "latest": "Error/FloodWait",
+                    "gap": "⏳ skipped (error or rate-limit)",
                 })
                 continue
 
@@ -180,13 +356,10 @@ async def scan_and_optionally_reset(
                 "old_cursor": old_cursor,
                 "latest": latest_id,
                 "gap": gap,
-                # payload for later update
                 "_chat_id_str": chat_id_str,
                 "_chat_ref": chat_ref,
                 "_latest_id": latest_id,
             })
-
-            # Small delay between chats to be gentle on the API
             await asyncio.sleep(1.5)
 
         # --- 5. Print summary ----------------------------------------------
