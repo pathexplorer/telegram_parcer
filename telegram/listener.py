@@ -112,6 +112,28 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     return dlg
             return None
 
+        def _ensure_alerted_list(values):
+            """Ensure the cursor entry has an alerted-list as its 3rd element.
+            
+            Cursor format: [ref, last_message_id, [alert_key, ...]]
+            The 3rd element tracks which one-shot health alerts have been sent.
+            """
+            if len(values) < 3:
+                values.append([])
+            elif not isinstance(values[2], list):
+                values[2] = []
+
+        def _was_alerted(values, alert_key):
+            """Check if a specific one-shot health alert was already sent for this chat."""
+            _ensure_alerted_list(values)
+            return alert_key in values[2]
+
+        def _mark_alerted(values, alert_key):
+            """Record that a health alert was sent (persisted on next Firestore save)."""
+            _ensure_alerted_list(values)
+            if alert_key not in values[2]:
+                values[2].append(alert_key)
+
         # previous_checked_ids = fs.load_firejson("cursor_base")
         # """ Return: nested dict { '12345' : [ '@name' , 11 ], '67890' : [ '@name' , 22 ] } """
 
@@ -307,8 +329,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     logging.error(
                         f"Cannot resolve chat {chat_id_str} by numeric ID either: {e2}. Skipping."
                     )
-                    if chat_id_str not in _alerted_chats:
-                        _alerted_chats.add(chat_id_str)
+                    if not _was_alerted(values, "access_lost"):
                         await send_health_alert(
                             "Lost access to chat",
                             f"**Chat ID:** `{chat_id_str}`\n"
@@ -318,6 +339,8 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                             f"The account may have lost access or the chat was deleted.",
                             level="error"
                         )
+                        _mark_alerted(values, "access_lost")
+                        db_was_updated = True
                     continue
                 # Update stored reference: new username if available, else use numeric ID
                 new_username = getattr(entity, 'username', None)
@@ -334,8 +357,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     )
                     values[0] = str(chat_id_str)
                 # --- Health alert: username lost, now tracking by numeric ID ---
-                if chat_id_str not in _alerted_chats:
-                    _alerted_chats.add(chat_id_str)
+                if not _was_alerted(values, "username_lost"):
                     await send_health_alert(
                         "Chat username lost",
                         f"**Chat:** `{_safe_title(entity)}`\n"
@@ -344,6 +366,8 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                         f"The @username no longer resolves. Group may have gone private.",
                         level="warning"
                     )
+                    _mark_alerted(values, "username_lost")
+                    db_was_updated = True
                 db_was_updated = True
 
             # C. Get actual messages
