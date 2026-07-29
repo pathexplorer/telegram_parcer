@@ -51,6 +51,23 @@ async def send_alert(message, keywords_found):
     )
     await send_bot_notification(alert_message)
 
+
+async def send_health_alert(title: str, body: str, level: str = "error") -> None:
+    """Send a pipeline health/status alert via the bot (non-keyword, operational).
+
+    Args:
+        title: Short alert title (e.g. "Chat resolution failed").
+        body: Markdown-formatted detail message.
+        level: Severity — "error" or "warning" (affects emoji prefix).
+    """
+    emoji = "❌" if level == "error" else "⚠️"
+    health_message = (
+        f"{emoji} **{title}** {emoji}\n\n"
+        f"{body}"
+    )
+    await send_bot_notification(health_message)
+
+
 # async def show_last_messages(entity, client, chat_ref):
 #     try:
 #         last_msg = await client.get_messages(entity, limit=1)
