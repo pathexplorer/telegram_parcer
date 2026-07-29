@@ -52,6 +52,33 @@ def forming_configuration():
 
     logger.info("Loaded %d known chats from database.", len(known_usernames_to_ids))
 
+    # --- 3b. Load-time cursor field validation ---
+    suspicious_entries: list[tuple[str, str]] = []
+    for key, values in previous_checked_ids.items():
+        if not isinstance(values, (list, tuple)) or len(values) < 2:
+            suspicious_entries.append(
+                (str(key), f"malformed structure: {type(values).__name__} (len={len(values) if hasattr(values, '__len__') else '?'})")
+            )
+            continue
+        cursor_val = values[1]
+        if not isinstance(cursor_val, int):
+            suspicious_entries.append(
+                (str(key), f"non-integer cursor: {type(cursor_val).__name__} = {cursor_val!r}")
+            )
+        elif cursor_val < 0:
+            suspicious_entries.append((str(key), f"negative cursor: {cursor_val}"))
+        elif cursor_val > 2_147_483_647:  # max Telegram message ID (2³¹ − 1)
+            suspicious_entries.append((str(key), f"suspiciously large cursor: {cursor_val}"))
+
+    if suspicious_entries:
+        logger.warning(
+            "Load-time validation found %d suspicious cursor entr%s:",
+            len(suspicious_entries),
+            "y" if len(suspicious_entries) == 1 else "ies"
+        )
+        for chat_id, reason in suspicious_entries:
+            logger.warning("  Chat %s: %s", chat_id, reason)
+
     # --- 4. Convert CSV strings to lists ---
     TARGET_CHATS_LIST = [
         chat.strip()
