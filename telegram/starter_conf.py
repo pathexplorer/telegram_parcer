@@ -79,6 +79,15 @@ def forming_configuration():
         for chat_id, reason in suspicious_entries:
             logger.warning("  Chat %s: %s", chat_id, reason)
 
+    # --- 3c. Migrate legacy nested-array alerted entries to CSV string ---
+    migrated_count = 0
+    for key, values in previous_checked_ids.items():
+        if isinstance(values, list) and len(values) >= 3 and isinstance(values[2], list):
+            values[2] = ",".join(str(k) for k in values[2] if k)
+            migrated_count += 1
+    if migrated_count:
+        logger.warning("Migrated %d legacy nested-array alerted entries to CSV format.", migrated_count)
+
     # --- 4. Convert CSV strings to lists ---
     TARGET_CHATS_LIST = [
         chat.strip()

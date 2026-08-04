@@ -45,8 +45,12 @@ except Exception as e:
 def main(request = None):
     from telegram.listener import poll_telegram
 
-    # Inject previously loaded data to lister during it runs
-    asyncio.run(poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, known_usernames_to_ids))
+    try:
+        # Inject previously loaded data to lister during it runs
+        asyncio.run(poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, known_usernames_to_ids))
+    except Exception:
+        logger.exception("❌ Unhandled exception in poll_telegram")
+        return "Internal error", 500
     return "Polling complete", 200
 
 if __name__ == "__main__":

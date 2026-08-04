@@ -113,26 +113,34 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
             return None
 
         def _ensure_alerted_list(values):
-            """Ensure the cursor entry has an alerted-list as its 3rd element.
-            
-            Cursor format: [ref, last_message_id, [alert_key, ...]]
-            The 3rd element tracks which one-shot health alerts have been sent.
+            """Ensure the cursor entry has an alerted-set as its 3rd element.
+
+            Cursor format: [ref, last_message_id, alert_keys_csv]
+            The 3rd element is a comma-separated string of alert keys (Firestore
+            does not allow nested arrays, so we serialize the set as a flat string).
+            Migrates legacy list-format entries to the new string format automatically.
             """
             if len(values) < 3:
-                values.append([])
-            elif not isinstance(values[2], list):
-                values[2] = []
+                values.append("")
+            elif isinstance(values[2], list):
+                # Migrate legacy nested-array format to CSV string
+                values[2] = ",".join(str(k) for k in values[2] if k)
+            elif not isinstance(values[2], str):
+                values[2] = ""
 
         def _was_alerted(values, alert_key):
             """Check if a specific one-shot health alert was already sent for this chat."""
             _ensure_alerted_list(values)
-            return alert_key in values[2]
+            alerted = values[2]
+            return alert_key in (alerted.split(",") if alerted else [])
 
         def _mark_alerted(values, alert_key):
             """Record that a health alert was sent (persisted on next Firestore save)."""
             _ensure_alerted_list(values)
-            if alert_key not in values[2]:
-                values[2].append(alert_key)
+            existing = [k for k in values[2].split(",") if k] if values[2] else []
+            if alert_key not in existing:
+                existing.append(alert_key)
+                values[2] = ",".join(existing)
 
         # previous_checked_ids = fs.load_firejson("cursor_base")
         # """ Return: nested dict { '12345' : [ '@name' , 11 ], '67890' : [ '@name' , 22 ] } """
