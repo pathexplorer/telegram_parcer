@@ -4,7 +4,7 @@ substitutions:
   _SERVICE_ACCOUNT: tele-looker-wizard@handy-cache-476919-t4.iam.gserviceaccount.com
   _RUNTIME: python312
   _TELEGRAM_SECRETS: "telegram-secrets"
-  _TAG_NAME: v3.0.0
+  _TAG_NAME: v3.0.2
   _GCP_PROJECT_ID: "handy-cache-476919-t4"
   _LOGGING_LEVEL: INFO
 
@@ -22,6 +22,7 @@ steps:
   - --trigger-http
   - --memory=512MB
   - --allow-unauthenticated
+  - --max-instances=1
   - --service-account=$_SERVICE_ACCOUNT
   - --set-env-vars=GCP_PROJECT_ID=$_GCP_PROJECT_ID,CODE_VERSION=$_TAG_NAME,TELEGRAM_SECRETS=$_TELEGRAM_SECRETS,LOGGING_LEVEL=$_LOGGING_LEVEL
   - --set-build-env-vars=PIP_EXTRA_INDEX_URL=https://us-central1-python.pkg.dev/handy-cache-476919-t4/bike-data-magic/simple/
