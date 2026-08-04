@@ -24,7 +24,7 @@ steps:
   - --allow-unauthenticated
   - --service-account=$_SERVICE_ACCOUNT
   - --set-env-vars=GCP_PROJECT_ID=$_GCP_PROJECT_ID,CODE_VERSION=$_TAG_NAME,TELEGRAM_SECRETS=$_TELEGRAM_SECRETS,LOGGING_LEVEL=$_LOGGING_LEVEL
-  - --build-env-vars=PIP_EXTRA_INDEX_URL=https://us-central1-python.pkg.dev/handy-cache-476919-t4/bike-data-magic/simple/
+  - --set-build-env-vars=PIP_EXTRA_INDEX_URL=https://us-central1-python.pkg.dev/handy-cache-476919-t4/bike-data-magic/simple/
   allow_exit_codes:
     - 0  # Allow success
     - 1  # Allow the non-critical failure code
