@@ -4,7 +4,7 @@ substitutions:
   _SERVICE_ACCOUNT: tele-looker-wizard@handy-cache-476919-t4.iam.gserviceaccount.com
   _RUNTIME: python312
   _TELEGRAM_SECRETS: "telegram-secrets"
-  _TAG_NAME: v3.0.2
+  _TAG_NAME: v3.0.3
   _GCP_PROJECT_ID: "handy-cache-476919-t4"
   _LOGGING_LEVEL: INFO
 

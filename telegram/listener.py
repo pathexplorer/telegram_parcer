@@ -7,6 +7,7 @@ from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 from gcp_actions.firestore_box.json_manipulations import FirestoreMagic
 from telegram.send import send_alert, send_health_alert
+from telegram.message_store import save_matched_message_to_firestore
 from project_env.config import session_string, API_ID, API_HASH
 
 logger = logging.getLogger(__name__)
@@ -429,6 +430,11 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
 
                     if found_keywords:
                         COUNT_KEYWORD_MATCHES += 1
+                        # Save full message to Firestore (independent of alert success)
+                        try:
+                            await save_matched_message_to_firestore(message, found_keywords)
+                        except Exception as fs_e:
+                            logging.error("Failed to save message %s to Firestore: %s", message.id, fs_e)
                         try:
                             await send_alert(message, found_keywords)
                             logging.info(f"Alarm sent successfully for message ID: {message.id}")
