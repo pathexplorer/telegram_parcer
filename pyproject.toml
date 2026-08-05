@@ -39,3 +39,39 @@ url = "https://pypi.org/simple"
 
 [tool.setuptools.packages.find]
 include = ["telegram*", "emergency*", "project_env*", "tests*"]
+
+# ── pytest ──
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests that require a real (or emulated) network dependency",
+    "unit: fast, isolated unit tests",
+]
+
+[tool.coverage.run]
+source = ["telegram_parcer", "telegram", "emergency", "project_env"]
+branch = true
+omit = ["tests/*", "test/*"]
+
+[tool.coverage.report]
+exclude_also = [
+    "def __repr__",
+    "if self\\.debug:",
+    "if settings\\.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
