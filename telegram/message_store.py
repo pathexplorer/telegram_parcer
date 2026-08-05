@@ -72,49 +72,116 @@ async def save_matched_message_to_firestore(message, found_keywords):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# Only these TL fields are persisted.  Everything else (service flags,
+# paid-promotion metadata, rarely-used fields) is dropped to keep documents
+# lean and human-readable.
+_KEPT_FIELDS: frozenset = frozenset({
+    # -- identity & time ----------------------------------------------------
+    "id",
+    "date",
+    # -- content ------------------------------------------------------------
+    "message",          # overridden with message.text below
+    "entities",         # @mentions, #hashtags, links, formatting
+    "media",            # photo / document / web-preview
+    "post_author",      # channel post signature
+    # -- context (only present when applicable) -----------------------------
+    "reply_to",         # reply header
+    "fwd_from",         # forward header
+    "edit_date",        # last edit timestamp
+    "grouped_id",       # album / grouped-media ID
+    # -- metrics ------------------------------------------------------------
+    "views",
+    "forwards",
+    "reactions",
+})
+
+
 def _serialize_message(message, found_keywords, chat_identifier, chat_id):
-    """Convert a Telethon Message into a Firestore-safe dict.
+    """Convert a Telethon Message into a minimal, Firestore-safe dict.
 
     Returns:
         (data_dict, is_truncated: bool)
     """
-    # Telethon's built-in serialization
-    raw = message.to_dict() if hasattr(message, 'to_dict') else _fallback_to_dict(message)
+    # 1. Extract only the fields we care about ----------------------------------
+    raw: dict = {}
+    for field_name in _KEPT_FIELDS:
+        try:
+            value = getattr(message, field_name, None)
+        except Exception:
+            value = None
+        raw[field_name] = _extract_tl_value(value)
 
-    sanitized = _sanitize_value(raw)
+    # 2. OVERRIDE the ``message`` field with ``message.text`` — this is the
+    #    canonical, full message text.
+    raw["message"] = message.text
 
-    # Attach pipeline metadata
-    sanitized["_meta"] = {
+    # 3. Simplify peer / sender to plain IDs (instead of nested TL dicts) ------
+    try:
+        pid = message.peer_id
+        raw["peer_id"] = getattr(pid, "channel_id", None) or getattr(pid, "chat_id", None) or getattr(pid, "user_id", None)
+    except Exception:
+        raw["peer_id"] = None
+    try:
+        fid = message.from_id
+        raw["from_id"] = getattr(fid, "channel_id", None) or getattr(fid, "user_id", None)
+    except Exception:
+        raw["from_id"] = None
+
+    # 4. Attach pipeline metadata -----------------------------------------------
+    raw["_meta"] = {
         "chat_id": chat_id,
         "chat_identifier": chat_identifier,
         "matched_keywords": found_keywords,
     }
 
-    # Size guard: truncate the ``message`` text field if the whole payload is too large.
+    # 5. Strip every ``None`` value (including deeply nested) so documents
+    #    stay compact — no ``"factcheck": null`` noise.
+    raw = _strip_nulls(raw)
+
+    # 6. Size guard -------------------------------------------------------------
     is_truncated = False
-    size_estimate = _estimate_size(sanitized)
+    size_estimate = _estimate_size(raw)
     if size_estimate > _MAX_DOC_SIZE_BYTES:
-        text_field = sanitized.get("message", "")
+        text_field = raw.get("message", "")
         if isinstance(text_field, str) and text_field:
-            # Rough heuristic: cut text in half and re-check; still too big → halve again.
             max_text_chars = len(text_field) // 2
             while max_text_chars > 0:
-                sanitized["message"] = text_field[:max_text_chars]
-                if _estimate_size(sanitized) <= _MAX_DOC_SIZE_BYTES:
+                raw["message"] = text_field[:max_text_chars]
+                if _estimate_size(raw) <= _MAX_DOC_SIZE_BYTES:
                     break
                 max_text_chars //= 2
-            sanitized["_meta"]["_truncated"] = True
-            sanitized["_meta"]["_original_text_length"] = len(text_field)
+            raw["_meta"]["_truncated"] = True
+            raw["_meta"]["_original_text_length"] = len(text_field)
             is_truncated = True
 
-    return sanitized, is_truncated
+    return raw, is_truncated
 
 
-def _sanitize_value(obj):
-    """Recursively convert a value to a Firestore-compatible type.
+def _strip_nulls(obj):
+    """Recursively remove keys whose value is ``None`` (or empty dicts/lists
+    after stripping), returning a compact dict/list/scalar."""
+    if isinstance(obj, dict):
+        cleaned = {}
+        for k, v in obj.items():
+            v = _strip_nulls(v)
+            if v is not None:
+                cleaned[k] = v
+        return cleaned or None
+    if isinstance(obj, list):
+        cleaned = [_strip_nulls(v) for v in obj if _strip_nulls(v) is not None]
+        return cleaned or None
+    return obj
 
-    Firestore natively supports: None, bool, int, float, str, bytes,
-    datetime, geo_point, list, dict.  Everything else is coerced to str.
+
+def _extract_tl_value(obj):
+    """Recursively convert a Telethon TL object (or any value) into a
+    plain Python dict/list/scalar suitable for Firestore.
+
+    * TLObject subclasses → dict of their constructor fields (recursively).
+    * datetime        → ``.isoformat()`` string.
+    * bytes           → base64-encoded string wrapper.
+    * list/tuple/set  → list of recursively-converted items.
+    * Everything else → returned as-is (str, int, float, bool, None).
     """
     if obj is None:
         return None
@@ -123,17 +190,49 @@ def _sanitize_value(obj):
     if isinstance(obj, bytes):
         import base64
         return {"_bytes_b64": base64.b64encode(obj).decode("ascii")}
-    if isinstance(obj, dict):
-        return {str(k): _sanitize_value(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
-        return [_sanitize_value(v) for v in obj]
-    if hasattr(obj, 'isoformat'):
-        # datetime / date → Firestore handles natively, but Telethon's
-        # to_dict may already have converted them to timestamps / strings.
-        # Keep the ISO string as a safe fallback.
-        return obj.isoformat()
+        return [_extract_tl_value(v) for v in obj]
+    if isinstance(obj, dict):
+        return {str(k): _extract_tl_value(v) for k, v in obj.items()}
+
+    # datetime / date → ISO string
+    if hasattr(obj, "isoformat"):
+        try:
+            return obj.isoformat()
+        except Exception:
+            return str(obj)
+
+    # Telethon TLObject — recursively unpack its constructor fields
+    if hasattr(obj, "__dict__") and hasattr(obj, "CONSTRUCTOR_ID"):
+        return _tlobject_to_dict(obj)
+
     # Last resort: string representation
     return str(obj)
+
+
+def _tlobject_to_dict(tl) -> dict:
+    """Recursively serialize an arbitrary Telethon TLObject to a dict.
+
+    Uses the same ``inspect.signature`` approach — extracts every
+    constructor parameter and converts nested values.
+    """
+    import inspect
+    result: dict = {}
+    try:
+        params = list(inspect.signature(tl.__init__).parameters.keys())
+        params.remove("self")
+    except Exception:
+        return {"_str": str(tl)}
+
+    for field_name in params:
+        try:
+            value = getattr(tl, field_name, None)
+        except Exception:
+            value = None
+        result[field_name] = _extract_tl_value(value)
+
+    result["_tl_type"] = type(tl).__name__
+    return result
 
 
 def _estimate_size(obj) -> int:
@@ -143,20 +242,3 @@ def _estimate_size(obj) -> int:
         return len(json.dumps(obj, default=str, ensure_ascii=False).encode("utf-8"))
     except Exception:
         return 0
-
-
-def _fallback_to_dict(message) -> dict:
-    """Manual fallback serialization if ``message.to_dict()`` is unavailable."""
-    return {
-        "id": getattr(message, "id", None),
-        "message": getattr(message, "text", None),
-        "date": getattr(message, "date", None),
-        "peer_id": str(getattr(message, "peer_id", "")),
-        "from_id": str(getattr(message, "from_id", "")),
-        "out": getattr(message, "out", None),
-        "mentioned": getattr(message, "mentioned", None),
-        "media_unread": getattr(message, "media_unread", None),
-        "silent": getattr(message, "silent", None),
-        "post": getattr(message, "post", None),
-        "grouped_id": getattr(message, "grouped_id", None),
-    }
