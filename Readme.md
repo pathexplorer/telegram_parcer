@@ -9,6 +9,8 @@ Key features:
 
 - **Keyword Monitoring**: Scans messages for specific keywords.
 
+- **Firestore Message Archive**: Saves the **full, uncropped** text of every keyword-matched message to Firestore (`matched_messages` collection). Telegram alerts still show a 300-character excerpt with a deep link; Firestore holds the complete message for search and audit.
+
 - **State Management**: Tracks the last checked message ID for each channel in **Google Cloud Firestore**, ensuring no messages are missed or processed twice (idempotency). Cursor is saved after **each chat** (not just at the end) to minimize data loss on interruption.
 
 - **Dynamic Configuration**: Channel lists and keywords are managed in Firestore, allowing updates without redeploying the code.
@@ -33,8 +35,9 @@ Key features:
 3.  **Optimization**: It maintains a local mapping of `username -> ID`. If a username changes, it automatically resolves the new ID and updates the database.
 4.  **Processing**: It fetches messages newer than the last checked ID.
 5.  **Matching**: Checks message content against keywords.
-6.  **Alerting**: Sends an alert to the `NOTIFICATION_CHAT` if a match is found.
-7.  **State Update**: Updates Firestore with the new "last checked ID" **after each chat** (incremental persistence). On shutdown (signal, timeout, or flood-wait), the cursor is saved immediately so the next run resumes from the last safely-acked position.
+6.  **Archiving**: If a keyword match is found, the **full**, uncropped message is saved to the `matched_messages` Firestore collection before the alert is sent. The save is independent — a Firestore write failure does **not** block the Telegram alert.
+7.  **Alerting**: Sends a 300-character excerpt alert to the `NOTIFICATION_CHAT` with a deep link to the original message.
+8.  **State Update**: Updates Firestore with the new "last checked ID" **after each chat** (incremental persistence). On shutdown (signal, timeout, or flood-wait), the cursor is saved immediately so the next run resumes from the last safely-acked position.
 
 ## Setup & Installation
 
@@ -200,6 +203,7 @@ Create the following structure in your Firestore database:
 | `telegram` | `keywords` | `word` | String (CSV) | Comma-separated list of keywords to search for. |
 | `telegram` | `chats` | `chats` | String (CSV) | Comma-separated list of channel usernames (e.g., `@channel1, @channel2`). |
 | `telegram` | `cursor_base` | *dynamic* | Map | Stores state. Don't create manually; the app will generate it. |
+| `matched_messages` | `{chat_id}_{message_id}` | *dynamic* | Map | Stores the **full**, uncropped content of every keyword-matched message. Created automatically — no manual setup needed. |
 
 ### 3. Secrets (Secret Manager)
 Create a secret in Google Secret Manager (e.g., named `telegram-secrets`). The value should be a JSON string:
@@ -278,6 +282,7 @@ When the time limit is reached, the current message loop finishes its iteration,
 - `main.py`: Entry point. Initializes config and runs the poller.
 - `telegram/`: Core logic.
   - `listener.py`: Main loop, polling logic, and message processing.
+  - `message_store.py`: Serializes and persists full matched messages to Firestore.
   - `starter_conf.py`: Loads initial configuration from Firestore.
   - `send.py`: Handles sending alerts.
 - `project_env/`: Configuration loaders.
