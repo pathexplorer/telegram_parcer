@@ -21,8 +21,9 @@ Key features:
 
 ## Architecture
 
-- **Language**: Python 3.11+
+- **Language**: Python 3.12
 - **Core Library**: `Telethon` (Async Telegram client)
+- **Testing**: `pytest` (81 tests across 5 test modules) with coverage tracking
 - **Infrastructure**:
   - **Google Cloud Firestore**: Stores configuration (`keywords`, `chats`) and state (`cursor_base`).
   - **Google Secret Manager**: Securely stores API credentials.
@@ -42,7 +43,7 @@ Key features:
 ## Setup & Installation
 
 ### Prerequisites
-- Python 3.11 or higher.
+- Python 3.12.
 - A Google Cloud Project with Billing enabled.
 - **Firestore** (Native mode recommended).
 - **Secret Manager** API enabled.
@@ -112,7 +113,7 @@ The project uses Telethon's `StringSession` — a portable string that stores yo
 Run the included session generator:
 
 ```bash
-source .venv1/bin/activate
+source .venv/bin/activate
 
 # The script reads API_ID and API_HASH from GCP Secret Manager,
 # so your GCP credentials must be set up:
@@ -164,7 +165,7 @@ NOTIFICATION_CHAT=-1001234567890
 #### H. Run the Project Locally
 
 ```bash
-source .venv1/bin/activate
+source .venv/bin/activate
 export $(grep -v '^#' keys.env | xargs)  # Load env vars from keys.env
 unset GOOGLE_APPLICATION_CREDENTIALS     # Use personal gcloud creds instead of SA key
 python main.py
@@ -179,21 +180,26 @@ You should see log output showing that the bot is scanning channels for keywords
 git clone <repository-url>
 cd telegram_parcer
 
-# Create virtual environment
-uv venv .venv1
-source .venv1/bin/activate
+# Create virtual environment and install dependencies (including dev deps for tests)
+uv sync
 
-# Install dependencies
-# NOTE: GOOGLE_APPLICATION_CREDENTIALS must be UNSET because VS Code
-# may set it to a service account that lacks Artifact Registry access.
-# Use your personal gcloud credentials instead:
-unset GOOGLE_APPLICATION_CREDENTIALS
-TOKEN=$(gcloud auth print-access-token)
-uv pip install -r requirements.txt \
-  --index-url "https://oauth2accesstoken:$TOKEN@us-central1-python.pkg.dev/$PROJECT_ID/bike-data-magic/simple/" \
-  --extra-index-url https://pypi.org/simple
+# Activate the environment
+source .venv/bin/activate
 ```
-*Note: This project depends on a custom library `gcp_actions` hosted in a private Artifact Registry. Your gcloud account (`gcloud auth list`) must have the `artifactregistry.reader` (or `writer`) role on the `$PROJECT_ID` project.*
+
+> **Dependency management**: This project uses [uv](https://docs.astral.sh/uv/) with
+> `pyproject.toml`. The private package `gcp-actions` is sourced from a local path
+> (`../gcp_actions`). For Cloud Build deployments, `requirements.txt` is kept in
+> sync as a fallback.
+>
+> If you need to install without `uv`, use:
+> ```bash
+> unset GOOGLE_APPLICATION_CREDENTIALS
+> TOKEN=$(gcloud auth print-access-token)
+> uv pip install -r requirements.txt \
+>   --index-url "https://oauth2accesstoken:$TOKEN@us-central1-python.pkg.dev/$PROJECT_ID/bike-data-magic/simple/" \
+>   --extra-index-url https://pypi.org/simple
+> ```
 
 ### 2. Configuration (Firestore)
 Create the following structure in your Firestore database:
@@ -228,12 +234,65 @@ MAX_POLL_SECONDS=120
 ```
 *replace `telegram-secrets` with the actual name of your secret in GCP.*
 
+## Testing
+
+The project includes a comprehensive test suite (**81 tests**) built with `pytest`.
+All GCP dependencies (Secret Manager, Firestore, Telethon, Cloud Logging) are mocked
+so tests run **offline** — no credentials or network access required.
+
+### Running Tests
+
+```bash
+# Activate the environment
+source .venv/bin/activate
+
+# Run the full test suite
+pytest
+
+# Run only unit tests (skip integration / slow tests)
+pytest -m "unit"
+
+# Run with coverage report
+pytest --cov --cov-report=term-missing
+
+# Run a specific test file
+pytest tests/test_listener.py -v
+
+# Run a specific test class or method
+pytest tests/test_starter_conf.py::TestCursorValidation -v
+```
+
+### Test Structure
+
+| File | Tests | What's Covered |
+|------|-------|---------------|
+| `test_gcf_deploy.py` | 10 | Full GCF invocation lifecycle, secrets injection, error paths |
+| `test_listener.py` | 18 | `_should_stop` signal/timeout, `_safe_title` entity extraction, `_save_cursor_sync` persistence, `poll_telegram` early-return & shutdown paths |
+| `test_message_store.py` | 20 | `_strip_nulls`, `_extract_tl_value` type conversion, `_tlobject_to_dict` serialization, `_serialize_message` truncation |
+| `test_send.py` | 8 | Bot API HTTP delivery, keyword alert formatting (username/title/ID fallbacks), health alert emoji selection |
+| `test_starter_conf.py` | 20 | Firestore config loading (keywords/chats/cursors), cursor validation (malformed, negative, large), legacy alert migration |
+
+### Test Markers
+
+| Marker | Purpose |
+|--------|--------|
+| `unit` | Fast, isolated tests (no I/O) — safe for pre-commit hooks |
+| `integration` | Tests that exercise multiple modules or mocked network deps |
+| `slow` | Tests with significant runtime — excluded from quick runs |
+
+### Shared Fixtures (`conftest.py`)
+
+The conftest provides reusable fixtures that mock all external dependencies:
+- **`mock_all_gcp_deps`** — Patches Secret Manager, Firestore, Telethon `TelegramClient`, and Cloud Logging in one call.
+- **`gcp_env`** (autouse) — Injects minimal GCF-style environment variables into every test.
+- **Module cache clearing** (autouse) — Ensures each test gets a fresh import of `telegram_parcer` / `telegram` modules, preventing cross-test contamination.
+
 ## Running the Project
 
 ### Local Mode
 The `main.py` detects if it's running locally and executes a test run.
 ```bash
-source .venv1/bin/activate
+source .venv/bin/activate
 export $(grep -v '^#' keys.env | xargs)  # Load env vars
 unset GOOGLE_APPLICATION_CREDENTIALS     # Use personal gcloud creds instead of SA key
 python main.py
@@ -242,7 +301,7 @@ python main.py
 ### Cloud Deployment
 The project is ready for Google Cloud.
 - **Entry Point**: `main`
-- **Runtime**: Python 3.11
+- **Runtime**: Python 3.12
 - Ensure the Service Account used has permissions for **Firestore User** and **Secret Manager Secret Accessor**.
 
 ### Graceful Shutdown & Time-Limited Polling
@@ -279,14 +338,33 @@ When the time limit is reached, the current message loop finishes its iteration,
 > **Tip**: If Telegram returns a `FloodWaitError` (wait > 60 s), the poller **saves the cursor immediately and exits** rather than waiting and risking a Cloud Function timeout.
 
 ## Directory Structure
-- `main.py`: Entry point. Initializes config and runs the poller.
-- `telegram/`: Core logic.
-  - `listener.py`: Main loop, polling logic, and message processing.
-  - `message_store.py`: Serializes and persists full matched messages to Firestore.
-  - `starter_conf.py`: Loads initial configuration from Firestore.
-  - `send.py`: Handles sending alerts.
-- `project_env/`: Configuration loaders.
-- `requirements.txt`: Python dependencies.
+```
+telegram_parcer/
+├── main.py                  # Entry point — initializes config and runs the poller
+├── pyproject.toml           # Project metadata, dependencies, pytest & coverage config
+├── requirements.txt         # Pinned deps for Cloud Build (fallback)
+├── keys.env                 # Local environment variables (git-ignored)
+├── telegram/                # Core logic
+│   ├── listener.py          # Main polling loop, message processing, cursor management
+│   ├── message_store.py     # Serializes & persists full matched messages to Firestore
+│   ├── starter_conf.py      # Loads keywords, chats & cursor state from Firestore
+│   ├── send.py              # Bot API alert delivery (keyword alerts & health alerts)
+│   └── local/
+│       └── get_session.py   # Interactive Telethon StringSession generator
+├── project_env/             # Environment & config loaders
+│   └── config.py            # Reads secrets from os.environ
+├── emergency/               # Operational tools
+│   └── reset_cursors.py     # Emergency cursor-reset utility
+├── test/                    # Diagnostic / manual test scripts
+│   └── diagnose_chat.py     # Chat accessibility diagnostic tool
+└── tests/                   # Automated test suite (pytest)
+    ├── conftest.py          # Shared fixtures — mocks for GCP, Firestore, Telethon
+    ├── test_gcf_deploy.py   # GCF deployment simulation (end-to-end)
+    ├── test_listener.py     # Polling loop, cursor management, shutdown logic
+    ├── test_message_store.py # Message serialization, truncation, TL object handling
+    ├── test_send.py         # Bot API notifications, alert formatting
+    └── test_starter_conf.py # Firestore config loading, cursor validation/migration
+```
 
 ---
 
@@ -302,7 +380,7 @@ When the time limit is reached, the current message loop finishes its iteration,
 
 1. **Re-run the session generator**:
    ```bash
-   source .venv1/bin/activate
+   source .venv/bin/activate
 
    # The script reads API_ID and API_HASH from GCP Secret Manager.
    # Use your personal gcloud credentials (unset the service account key):

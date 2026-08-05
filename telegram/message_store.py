@@ -219,7 +219,10 @@ def _tlobject_to_dict(tl) -> dict:
     import inspect
     result: dict = {}
     try:
-        params = list(inspect.signature(tl.__init__).parameters.keys())
+        # Use type(tl).__init__ (unbound) so that 'self' is included in the
+        # parameter list.  tl.__init__ is a bound method whose signature
+        # already omits 'self' in Python ≥ 3.
+        params = list(inspect.signature(type(tl).__init__).parameters.keys())
         params.remove("self")
     except Exception:
         return {"_str": str(tl)}
