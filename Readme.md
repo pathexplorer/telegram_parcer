@@ -29,6 +29,11 @@ Key features:
   - **Google Secret Manager**: Securely stores API credentials.
   - **Google Cloud Run / Functions**: Intended deployment environment.
 
+The project is deployed as a **Google Cloud Function (Gen 1)**, HTTP-triggered, with a 500 s timeout.
+It is invoked by **Cloud Scheduler** using an OIDC-authenticated request to the function's
+`--trigger-http` endpoint.  The function must **not** be deployed with `--allow-unauthenticated`;
+Cloud Scheduler authenticates via the service account bound to the function.
+
 ### Data Flow
 
 1.  **Configuration Load**: On startup, the app loads sensitive secrets (`API_ID`, `API_HASH`, `session_string`) from Secret Manager and operational config (target chats, keywords) from Firestore.
@@ -68,10 +73,18 @@ Follow these steps in order to set up the project from scratch.
      - **Secret Manager Secret Accessor**
    - Click **Done**
    > Do **not** use your personal Google account (owner email) or the default App Engine SA (`{project_id}@appspot.gserviceaccount.com`) — create a dedicated SA with minimal permissions.
-5. Generate and download a JSON key:
-   - In the Service Account list → click the email of your new SA → **Keys** → **Add Key** → **Create New Key** → **JSON**
-   - Rename the downloaded file to something clear, e.g. `telegram-parser-key.json`, and place it in a safe location (e.g. `/home/your-user/keys/`).
-   - The `GOOGLE_APPLICATION_CREDENTIALS` env var will point to this file.
+5. **Authenticate locally using Application Default Credentials** (recommended):
+   ```bash
+   gcloud auth application-default login
+   ```
+   This stores short-lived credentials at `~/.config/gcloud/application_default_credentials.json`.
+   The Google client libraries discover them automatically — no JSON key file needed.
+
+   > ⚠️ **Avoid downloading service-account JSON keys for local development.**
+   > Long-lived keys are a security risk.  Use ADC or workload identity federation instead.
+   > If you absolutely must use a key (e.g. an air-gapped environment), download it from
+   > **IAM → Service Accounts → Keys → Add Key → JSON**, store it securely, and
+   > rotate it regularly.  Set `GOOGLE_APPLICATION_CREDENTIALS` to the key path.
 
 #### B. Firestore — Create Configuration Documents
 
@@ -151,13 +164,22 @@ Make sure the Service Account from step A has the **Secret Manager Secret Access
 
 #### G. Prepare Local Environment
 
-Create a `keys.env` file in the project root:
+Copy the example file and fill in your values:
+
+```bash
+cp keys.env.example keys.env
+# Edit keys.env with your project ID, secret name, and notification chat ID
+```
+
+The `keys.env` file should contain:
 
 ```env
 PROJECT_ID=your-gcp-project-id
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/your-service-account-key.json
 TELEGRAM_SECRETS=telegram-secrets
 NOTIFICATION_CHAT=-1001234567890
+# GOOGLE_APPLICATION_CREDENTIALS is NOT needed — ADC is used by default.
+# Only set it if you are using a service-account JSON key (not recommended).
+# GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 ```
 
 > The `TELEGRAM_SECRETS` value must match the name of the secret you created in step F.
@@ -167,7 +189,6 @@ NOTIFICATION_CHAT=-1001234567890
 ```bash
 source .venv/bin/activate
 export $(grep -v '^#' keys.env | xargs)  # Load env vars from keys.env
-unset GOOGLE_APPLICATION_CREDENTIALS     # Use personal gcloud creds instead of SA key
 python main.py
 ```
 

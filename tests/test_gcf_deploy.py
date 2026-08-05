@@ -35,10 +35,12 @@ class _MockRequest:
     """A lightweight stand-in for the Flask Request that GCF wraps around the
     incoming HTTP call.  We only need it to be a non-None object; the main()
     handler does not inspect the request body.
+
+    Includes a dummy Authorization header so the new auth gate passes.
     """
 
     method = "GET"
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = {"Authorization": "Bearer mock-oidc-token"}
     environ: dict[str, str] = {}
 
     def get_json(self, silent: bool = False) -> dict | None:
@@ -98,16 +100,21 @@ class TestConfigLoading:
     """Verify that Secrets and Firestore config are loaded correctly."""
 
     def test_secrets_injected_into_environment(self):
-        """After import, API_ID and API_HASH should be in os.environ."""
+        """After main() is called, secret env vars (API_ID, API_HASH) are populated.
+
+        Secrets are injected lazily on the first main() invocation, not at
+        import time (so warm instances can refresh Firestore config without
+        re-fetching secrets).
+        """
         from telegram_parcer.main import main
 
-        # main module's import-time code injects secrets into os.environ
-        assert os.environ.get("API_ID") == "12345"
-        assert os.environ.get("API_HASH") == "abc123hash"
-
-        # Quick sanity: calling main still works
+        # Trigger secret injection by invoking main()
         body, status = main(_make_request())
         assert status == 200
+
+        # Now secrets should be in the environment
+        assert os.environ.get("API_ID") == "12345"
+        assert os.environ.get("API_HASH") == "abc123hash"
 
     def test_firestore_keywords_and_chats_loaded(self):
         """starter_conf.forming_configuration() reads from Firestore mock."""
@@ -131,8 +138,8 @@ class TestConfigLoading:
 class TestGCFDeployErrors:
     """Error scenarios that should be surfaced before or during GCF invocation."""
 
-    def test_missing_required_env_var_causes_exit(self):
-        """If API_ID is missing after config load, the module should sys.exit(1)."""
+    def test_missing_required_env_var_returns_500(self):
+        """If API_ID is missing after config load, main() returns 500 (not crash)."""
         from unittest.mock import patch
 
         env_without_secrets = {
@@ -156,7 +163,7 @@ class TestGCFDeployErrors:
             lambda doc, field: ",".join(str(x) for x in doc.get(field, []))
         )
 
-        # Clean cached modules first
+        # Clean cached modules and the per-process config cache
         for mod in list(sys.modules):
             if mod.startswith("telegram_parcer") or mod.startswith("telegram"):
                 del sys.modules[mod]
@@ -172,15 +179,21 @@ class TestGCFDeployErrors:
                         return_value=fs_mock,
                     ):
                         with patch("telethon.TelegramClient"):
-                            # Import should trigger sys.exit(1) due to missing env vars
-                            with pytest.raises(SystemExit) as exc_info:
-                                # We need to force-reload - delete and re-import
-                                import importlib
-                                import telegram_parcer.main
+                            import importlib
+                            import telegram_parcer.main
 
-                                importlib.reload(telegram_parcer.main)
+                            importlib.reload(telegram_parcer.main)
+                            # Clear the per-process config cache so secrets
+                            # are re-injected on the next main() call.
+                            telegram_parcer.main._config_cache = None
+                            telegram_parcer.main._config_loaded_at = 0.0
 
-                            assert exc_info.value.code == 1, "Should exit with code 1"
+                            # main() gracefully returns 500 when secrets are missing
+                            req = _make_request()
+                            body, status = telegram_parcer.main.main(req)
+
+                            assert status == 500, f"Expected 500, got {status}"
+                            assert "Configuration error" in body
 
     def test_empty_keywords_list_causes_runtime_error(self):
         """If Firestore returns empty keywords, forming_configuration should raise."""

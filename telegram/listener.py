@@ -2,11 +2,13 @@ import logging
 import asyncio
 import time
 import os
+
+import aiohttp
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 from gcp_actions.firestore_box.json_manipulations import FirestoreMagic
-from telegram.send import send_alert, send_health_alert
+from telegram.send import send_alert, send_health_alert, send_bot_notification
 from telegram.message_store import save_matched_message_to_firestore
 from project_env.config import session_string, API_ID, API_HASH
 
@@ -87,6 +89,11 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
 
     async with TelegramClient(StringSession(session_string), API_ID, API_HASH,flood_sleep_threshold=60) as client:
         await client.start()
+
+        # --- Create shared HTTP session for this poll cycle -------------------
+        # One session reused for all Bot API calls — avoids per-call
+        # connection setup and provides a uniform timeout.
+        http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
 
         # --- Build dialog cache for numeric-ID fallback resolution ---
         # Dialog objects include input_entity with proper access_hash, essential for
@@ -183,6 +190,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 logger.warning("🛑 Shutdown (%s) during chat registration. Saving partial state.", stop_reason)
                 if db_was_updated:
                     _save_cursor_sync(fs, previous_checked_ids)
+                await http_session.close()
                 return
 
             try:
@@ -268,7 +276,8 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                         f"**Ref:** `{chat_ref}`\n"
                         f"**Error:** {e}\n"
                         f"Chat could not be resolved. It will not be monitored this cycle.",
-                        level="error"
+                        level="error",
+                        session=http_session,
                     )
 
         # 4. Upload to Firebase *ONCE* at the end, only if needed.
@@ -346,7 +355,8 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                             f"**Error:** {e2}\n"
                             f"Cannot resolve by username or numeric ID. "
                             f"The account may have lost access or the chat was deleted.",
-                            level="error"
+                            level="error",
+                            session=http_session,
                         )
                         _mark_alerted(values, "access_lost")
                         db_was_updated = True
@@ -373,7 +383,8 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                         f"**Old ref:** `{value0}`\n"
                         f"**Now tracking by ID:** `{chat_id_str}`\n"
                         f"The @username no longer resolves. Group may have gone private.",
-                        level="warning"
+                        level="warning",
+                        session=http_session,
                     )
                     _mark_alerted(values, "username_lost")
                     db_was_updated = True
@@ -398,6 +409,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     e.seconds, value0, chat_id_str,
                 )
                 _save_cursor_sync(fs, previous_checked_ids)
+                await http_session.close()
                 await client.disconnect()
                 return
             except Exception as e:
@@ -436,13 +448,18 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                         except Exception as fs_e:
                             logging.error("Failed to save message %s to Firestore: %s", message.id, fs_e)
                         try:
-                            await send_alert(message, found_keywords)
+                            await send_alert(message, found_keywords, session=http_session)
                             logging.info(f"Alarm sent successfully for message ID: {message.id}")
                             COUNT_ALERTS_SENT += 1
                             last_acked_id = message.id  # only advance cursor on success
                         except Exception as alert_e:
                             logging.error(f"❌ ERROR sending alert for Message ID {message.id}: {alert_e}. "
                                           f"Cursor will NOT advance past this message — will retry on next run.")
+                            # Stop processing this chat immediately so the cursor
+                            # stays at the last successfully-acked message.
+                            # A later message in this batch must not advance the
+                            # cursor past a failed one.
+                            break
                 else:
                     logging.debug(f"Message ID {message.id}: (Non-text message)")
 
@@ -458,12 +475,12 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     last_acked_id, newest_message_id, value0, name, current_last_message_id
                 )
                 try:
-                    from telegram.send import send_bot_notification
                     await send_bot_notification(
                         f"⚠️ **CURSOR GUARD TRIGGERED**\n"
                         f"Chat: `{value0}` (`{name}`)\n"
                         f"Computed cursor ({last_acked_id}) > newest message ({newest_message_id})\n"
-                        f"Cursor NOT advanced — kept at {current_last_message_id}"
+                        f"Cursor NOT advanced — kept at {current_last_message_id}",
+                        session=http_session,
                     )
                 except Exception as alert_e:
                     logger.error("Failed to send cursor guard alert: %s", alert_e)
@@ -511,7 +528,6 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     {str(v): [str(c) for c in chats] for v, chats in duplicate_cursors.items()}
                 )
                 try:
-                    from telegram.send import send_bot_notification
                     detail_lines = []
                     for val, chats in duplicate_cursors.items():
                         chat_list = ", ".join(f"`{c}`" for c in chats)
@@ -520,7 +536,8 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                         f"🚨 **CROSS-CONTAMINATION DETECTED**\n"
                         f"Multiple chats would get the same cursor value:\n"
                         + "\n".join(detail_lines) +
-                        f"\n\nSave **ABORTED** — cursor_base was NOT updated."
+                        f"\n\nSave **ABORTED** — cursor_base was NOT updated.",
+                        session=http_session,
                     )
                 except Exception as alert_e:
                     logger.error("Failed to send cross-contam alert: %s", alert_e)
@@ -546,4 +563,5 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
             logger.warning("🛑 Shutdown (%s) — final state saved.", stop_reason)
         else:
             logger.info("✅ Polling completed normally — all chats processed.")
+        await http_session.close()
         await client.disconnect()
