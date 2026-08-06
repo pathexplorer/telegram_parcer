@@ -76,6 +76,24 @@ flowchart TD
 
 **Delivery guarantees**: The system provides **at-least-once** alerting. If the process crashes after a successful Bot API delivery but before the Firestore cursor is saved, the same message will be re-fetched and the alert duplicated on the next invocation. Conversely, if an alert fails, the cursor stops at the last successfully-acked message — no message is silently skipped. The archive key (`{chat_id}_{message_id}`) is naturally idempotent; duplicate writes to `matched_messages` are harmless.
 
+### ⚠️ Important: Single-Instance Constraint
+
+**Do not enable autoscaling on the Cloud Function.** Telethon sessions are tied to a single
+connection — if a second Cloud Function instance starts while the first is still running
+(or if two instances run concurrently), Telegram will invalidate the session string when
+it sees the same session connecting from a different IP/endpoint. This causes
+`AUTH_KEY_UNREGISTERED` errors and requires regenerating the session.
+
+- Set **maximum instances to 1** in your Cloud Function configuration.
+- The Scheduler interval should be **longer than the function's maximum execution time**
+  to prevent overlap (e.g., 10-minute schedule with a 9-minute `MAX_POLL_SECONDS` limit).
+- The poller itself uses `MAX_POLL_SECONDS` to self-limit and exit before the Cloud
+  Functions timeout, further reducing the risk of concurrent invocations.
+- **Never run the local version while the Cloud Scheduler is active.** Running both
+  simultaneously will cause Telethon to block the session string (same as two cloud
+  instances colliding). Always pause the scheduler before local testing, and resume it
+  afterwards (see [Local Mode](#local-mode) for the commands).
+
 ## Setup & Installation
 
 ### Prerequisites
@@ -313,18 +331,186 @@ The conftest provides reusable fixtures that mock all external dependencies:
 
 ### Local Mode
 The `main.py` detects if it's running locally and executes a test run.
+
+> ⚠️ **Before running locally, pause the Cloud Scheduler!**
+> If the cloud function and your local instance both use the same session string
+> at the same time, Telethon will invalidate the session. See
+> [Single-Instance Constraint](#️-important-single-instance-constraint).
+
+**Recommended — use the convenience script** (`run_local.sh`):
 ```bash
+# The script automatically pauses the scheduler, runs the poller,
+# and resumes the scheduler afterwards (even on Ctrl+C or errors).
+./run_local.sh
+
+# Extra args are forwarded to main.py:
+MAX_POLL_SECONDS=60 ./run_local.sh
+```
+
+**Manual approach** (if you prefer to control each step):
+```bash
+# 1. Pause the Cloud Scheduler job
+gcloud scheduler jobs pause telegram-poll-job --location=$REGION
+
+# 2. Run locally
 source .venv/bin/activate
 export $(grep -v '^#' keys.env | xargs)  # Load env vars
 unset GOOGLE_APPLICATION_CREDENTIALS     # Use personal gcloud creds instead of SA key
 python main.py
+
+# 3. Resume the Cloud Scheduler job when done
+gcloud scheduler jobs resume telegram-poll-job --location=$REGION
 ```
 
 ### Cloud Deployment
-The project is ready for Google Cloud.
-- **Entry Point**: `main`
-- **Runtime**: Python 3.12
-- Ensure the Service Account used has permissions for **Firestore User** and **Secret Manager Secret Accessor**.
+
+The project deploys to **Cloud Functions (Gen 1)** via a YAML-based **Cloud Build** pipeline (`start.yaml`).
+It is invoked by **Cloud Scheduler** with OIDC authentication — the function must **not** be publicly accessible.
+
+#### Quick Environment Setup
+
+Source these before running any deployment commands:
+
+```bash
+export PROJECT_ID=$(gcloud config get-value project)
+export REGION=us-central1
+export SERVICE_ACCOUNT="tele-looker-wizard@${PROJECT_ID}.iam.gserviceaccount.com"
+export BUCKET=telemegagram
+export AR_REPO=bike-data-magic
+```
+
+#### A. Enable Required APIs
+
+```bash
+gcloud services enable cloudbuild.googleapis.com
+gcloud services enable run.googleapis.com
+gcloud services enable cloudfunctions.googleapis.com
+gcloud services enable cloudscheduler.googleapis.com
+gcloud services enable cloudresourcemanager.googleapis.com  # needed for YAML build
+```
+
+#### B. Create the Dedicated Service Account
+
+```bash
+gcloud iam service-accounts create tele-looker-wizard \
+  --display-name="Wonderful action with telemessages"
+```
+
+Grant project-level roles:
+
+```bash
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/storage.objectAdmin"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/logging.logWriter"
+```
+
+Grant access to the **Secret Manager secret** (resource-level):
+
+```bash
+gcloud secrets add-iam-policy-binding telegram-secrets \
+  --member="serviceAccount:$SERVICE_ACCOUNT" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+#### C. Grant Cloud Build Permissions
+
+Cloud Build needs permission to deploy Cloud Functions and act as the service account:
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/cloudfunctions.developer"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountUser"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/run.admin"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/serviceusage.serviceUsageConsumer"
+```
+
+Grant Cloud Build's SA the ability to impersonate your runtime SA:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding $SERVICE_ACCOUNT \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountUser"
+```
+
+#### D. Deploy via Cloud Build (YAML)
+
+```bash
+gcloud builds submit --config start.yaml \
+  --gcs-source-staging-dir=gs://${PROJECT_ID}_self_cloudbuild/source
+```
+
+This builds and deploys the Cloud Function using the pipeline defined in `start.yaml`.
+
+#### E. Set Up Cloud Scheduler
+
+Create a scheduler job that invokes the function every 10 minutes (during active hours 05:00–21:00 UTC):
+
+```bash
+gcloud scheduler jobs create http telegram-poll-job \
+  --schedule "*/10 5-21 * * *" \
+  --uri "https://${REGION}-${PROJECT_ID}.cloudfunctions.net/telegramPoller" \
+  --http-method GET \
+  --location $REGION
+```
+
+#### F. Secure the Function with OIDC (Required!)
+
+The function **must not** allow unauthenticated access. Configure it so only Cloud Scheduler
+(via its service account) can invoke it:
+
+1. **In Cloud Scheduler** — edit the job, change **Auth** from `None` to **OIDC**,
+   and set the service account to `$SERVICE_ACCOUNT`.
+
+2. **On the Cloud Function** — go to **Permissions** → **Add Principal**:
+   - Principal: `$SERVICE_ACCOUNT`
+   - Role: **Cloud Run Invoker** (`roles/run.invoker`)
+
+3. Remove the **allUsers** binding if one exists (it was likely added during initial deploy).
+
+Verify the IAM policy:
+
+```bash
+gcloud run services get-iam-policy telegrampoller \
+  --region=$REGION \
+  --project=$PROJECT_ID
+```
+
+#### G. Debugging 403 Errors
+
+If Cloud Scheduler gets a `403 Forbidden`, the OIDC auth is misconfigured. Check:
+
+```bash
+# Check current IAM bindings on the Cloud Run service
+gcloud run services get-iam-policy telegrampoller \
+  --region=$REGION \
+  --project=$PROJECT_ID
+
+# Manually grant Cloud Run Invoker to the scheduler's SA if missing
+gcloud run services add-iam-policy-binding telegrampoller \
+  --member="serviceAccount:$SERVICE_ACCOUNT" \
+  --role="roles/run.invoker" \
+  --region=$REGION \
+  --project=$PROJECT_ID
+```
+
+Also verify the scheduler job uses **OIDC auth** (not `None`) and that the service account
+email in the scheduler job matches the one granted `roles/run.invoker`.
 
 ### Graceful Shutdown & Time-Limited Polling
 
@@ -363,6 +549,7 @@ When the time limit is reached, the current message loop finishes its iteration,
 ```
 telegram_parcer/
 ├── main.py                  # Entry point — initializes config and runs the poller
+├── run_local.sh             # Safe local runner — pauses/resumes Cloud Scheduler automatically
 ├── pyproject.toml           # Project metadata, dependencies, pytest & coverage config
 ├── requirements.txt         # Pinned deps for Cloud Build (fallback)
 ├── keys.env                 # Local environment variables (git-ignored)
