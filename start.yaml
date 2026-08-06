@@ -28,6 +28,7 @@ steps:
   - --max-instances=1
   - --service-account=$_SERVICE_ACCOUNT
   - --set-env-vars=GCP_PROJECT_ID=$_GCP_PROJECT_ID,CODE_VERSION=$_TAG_NAME,TELEGRAM_SECRETS=$_TELEGRAM_SECRETS,LOGGING_LEVEL=$_LOGGING_LEVEL,MAX_POLL_SECONDS=$_MAX_POLL_SECONDS
+  - --set-build-env-vars=PIP_EXTRA_INDEX_URL=https://us-central1-python.pkg.dev/$_GCP_PROJECT_ID/bike-data-magic/simple/
 
 # Gen 1 HTTP function max timeout is 540 s.
 timeout: '500s'
