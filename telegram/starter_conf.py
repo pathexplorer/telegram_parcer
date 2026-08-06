@@ -1,6 +1,52 @@
-from gcp_actions.firestore_box.json_manipulations import FirestoreMagic
 import logging
+import unicodedata
+
+from gcp_actions.firestore_box.json_manipulations import FirestoreMagic
+
 logger = logging.getLogger(__name__)
+
+# Current cursor schema version.  Bump when the cursor format changes.
+# Written into each cursor entry so future code can identify the format.
+CURSOR_SCHEMA_VERSION = 1
+
+
+def _migrate_cursor_to_typed(previous_checked_ids: dict) -> int:
+    """Convert legacy positional-list cursors to typed dicts in place.
+
+    Legacy format:  [ref_str, last_message_id_int, alerted_csv_str]
+    New format:     {"ref": str, "last_processed_id": int,
+                     "alerted_keys": str, "schema_version": 1}
+
+    Returns the number of entries migrated.
+    """
+    migrated = 0
+    for key, values in previous_checked_ids.items():
+        if isinstance(values, dict):
+            # Already typed — ensure schema_version is set
+            if "schema_version" not in values:
+                values["schema_version"] = CURSOR_SCHEMA_VERSION
+            continue
+        if not isinstance(values, (list, tuple)):
+            continue  # corrupt entry, leave for validation
+
+        ref = str(values[0]) if len(values) >= 1 else ""
+        last_id = int(values[1]) if len(values) >= 2 and isinstance(values[1], int) else 0
+        alerted = ""
+        if len(values) >= 3:
+            alerted = str(values[2]) if isinstance(values[2], str) else ",".join(
+                str(k) for k in values[2] if k
+            ) if isinstance(values[2], list) else ""
+
+        previous_checked_ids[key] = {
+            "ref": ref,
+            "last_processed_id": last_id,
+            "alerted_keys": alerted,
+            "schema_version": CURSOR_SCHEMA_VERSION,
+        }
+        migrated += 1
+
+    return migrated
+
 
 def forming_configuration():
     """
@@ -37,30 +83,48 @@ def forming_configuration():
         logger.critical("FATAL: 'cursor_base' is not a dict. Got type: %s", type(previous_checked_ids))
         raise RuntimeError("cursor_base document is corrupt.")
 
-    # --- 3. Build username→ID lookup ---
+    # --- 3. Migrate legacy formats BEFORE validation -----------------------
+    # Step 3a: Migrate nested-array alerted entries to CSV string (legacy v1→v2)
+    nested_migrated = 0
+    for key, values in previous_checked_ids.items():
+        if isinstance(values, list) and len(values) >= 3 and isinstance(values[2], list):
+            values[2] = ",".join(str(k) for k in values[2] if k)
+            nested_migrated += 1
+    if nested_migrated:
+        logger.warning("Migrated %d legacy nested-array alerted entries to CSV format.", nested_migrated)
+
+    # Step 3b: Migrate positional-list cursors to typed dicts (legacy → v3)
+    typed_migrated = _migrate_cursor_to_typed(previous_checked_ids)
+    if typed_migrated:
+        logger.warning(
+            "Migrated %d legacy positional-list cursor(s) to typed-dict format (schema_version=%d).",
+            typed_migrated, CURSOR_SCHEMA_VERSION,
+        )
+
+    # --- 4. Build username→ID lookup (typed-dict access) ------------------
     known_usernames_to_ids = {}
     if previous_checked_ids:
         try:
             known_usernames_to_ids = {
-                values[0]: key
+                values["ref"]: key
                 for key, values in previous_checked_ids.items()
             }
-        except (IndexError, TypeError) as e:
+        except (KeyError, TypeError) as e:
             logger.error("Database cursor_base is corrupt: %s. Rebuilding from scratch.", e)
             known_usernames_to_ids = {}
             previous_checked_ids = {}
 
     logger.info("Loaded %d known chats from database.", len(known_usernames_to_ids))
 
-    # --- 3b. Load-time cursor field validation ---
+    # --- 5. Load-time cursor field validation (typed-dict access) ----------
     suspicious_entries: list[tuple[str, str]] = []
     for key, values in previous_checked_ids.items():
-        if not isinstance(values, (list, tuple)) or len(values) < 2:
+        if not isinstance(values, dict):
             suspicious_entries.append(
-                (str(key), f"malformed structure: {type(values).__name__} (len={len(values) if hasattr(values, '__len__') else '?'})")
+                (str(key), f"malformed structure: {type(values).__name__} (expected dict)")
             )
             continue
-        cursor_val = values[1]
+        cursor_val = values.get("last_processed_id")
         if not isinstance(cursor_val, int):
             suspicious_entries.append(
                 (str(key), f"non-integer cursor: {type(cursor_val).__name__} = {cursor_val!r}")
@@ -79,16 +143,7 @@ def forming_configuration():
         for chat_id, reason in suspicious_entries:
             logger.warning("  Chat %s: %s", chat_id, reason)
 
-    # --- 3c. Migrate legacy nested-array alerted entries to CSV string ---
-    migrated_count = 0
-    for key, values in previous_checked_ids.items():
-        if isinstance(values, list) and len(values) >= 3 and isinstance(values[2], list):
-            values[2] = ",".join(str(k) for k in values[2] if k)
-            migrated_count += 1
-    if migrated_count:
-        logger.warning("Migrated %d legacy nested-array alerted entries to CSV format.", migrated_count)
-
-    # --- 4. Convert CSV strings to lists ---
+    # --- 6. Convert CSV strings to lists ----------------------------------
     TARGET_CHATS_LIST = [
         chat.strip()
         for chat in fire_chats.split(',')
@@ -101,7 +156,21 @@ def forming_configuration():
         if kw.strip()
     ]
 
-    logger.info("Configuration ready: %d keywords, %d target chats.",
+    # --- 6b. Normalize keywords for Unicode-aware matching -----------------
+    # NFKC normalizes compatibility equivalents (fullwidth, ligatures) into
+    # composed canonical forms.  casefold() provides locale-independent
+    # case-insensitive comparison (e.g. "ß" → "ss", "İ" → "i̇").
+    # Deduplicate after normalization to avoid redundant checks.
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for kw in KEYWORDS_LIST:
+        nk = unicodedata.normalize("NFKC", kw).casefold()
+        if nk and nk not in seen:
+            seen.add(nk)
+            normalized.append(nk)
+    KEYWORDS_LIST = normalized
+
+    logger.info("Configuration ready: %d keywords (normalized), %d target chats.",
                 len(KEYWORDS_LIST), len(TARGET_CHATS_LIST))
 
     return KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, known_usernames_to_ids

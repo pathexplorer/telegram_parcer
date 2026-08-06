@@ -2,6 +2,7 @@ import logging
 import asyncio
 import time
 import os
+import unicodedata
 
 import aiohttp
 from telethon import TelegramClient
@@ -13,10 +14,6 @@ from telegram.message_store import save_matched_message_to_firestore
 from project_env.config import session_string, API_ID, API_HASH
 
 logger = logging.getLogger(__name__)
-
-COUNT_PROCESSED_MESSAGES = 0
-COUNT_KEYWORD_MATCHES = 0
-COUNT_ALERTS_SENT = 0
 
 
 def _should_stop(shutdown_event, deadline):
@@ -64,6 +61,11 @@ def _safe_title(entity):
 
 async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, known_usernames_to_ids,
                         shutdown_event=None, max_runtime_seconds=None):
+
+    # --- Per-invocation counters (reset on every call, not module globals) ---
+    count_processed = 0
+    count_matches = 0
+    count_alerts = 0
 
     # --- Initialize Firestore client for cursor_base ---
     fs = FirestoreMagic("telegram", "cursor_base")
@@ -120,68 +122,33 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     return dlg
             return None
 
-        def _ensure_alerted_list(values):
-            """Ensure the cursor entry has an alerted-set as its 3rd element.
+        def _ensure_alerted_keys(values):
+            """Ensure the cursor entry has an alerted_keys field.
 
-            Cursor format: [ref, last_message_id, alert_keys_csv]
-            The 3rd element is a comma-separated string of alert keys (Firestore
-            does not allow nested arrays, so we serialize the set as a flat string).
-            Migrates legacy list-format entries to the new string format automatically.
+            Cursor format: {"ref": str, "last_processed_id": int,
+                            "alerted_keys": str, "schema_version": int}
+            The alerted_keys field is a comma-separated string of alert keys
+            (Firestore does not allow nested arrays).
             """
-            if len(values) < 3:
-                values.append("")
-            elif isinstance(values[2], list):
-                # Migrate legacy nested-array format to CSV string
-                values[2] = ",".join(str(k) for k in values[2] if k)
-            elif not isinstance(values[2], str):
-                values[2] = ""
+            if "alerted_keys" not in values:
+                values["alerted_keys"] = ""
 
         def _was_alerted(values, alert_key):
             """Check if a specific one-shot health alert was already sent for this chat."""
-            _ensure_alerted_list(values)
-            alerted = values[2]
+            _ensure_alerted_keys(values)
+            alerted = values["alerted_keys"]
             return alert_key in (alerted.split(",") if alerted else [])
 
         def _mark_alerted(values, alert_key):
             """Record that a health alert was sent (persisted on next Firestore save)."""
-            _ensure_alerted_list(values)
-            existing = [k for k in values[2].split(",") if k] if values[2] else []
+            _ensure_alerted_keys(values)
+            existing = [k for k in values["alerted_keys"].split(",") if k] if values["alerted_keys"] else []
             if alert_key not in existing:
                 existing.append(alert_key)
-                values[2] = ",".join(existing)
-
-        # previous_checked_ids = fs.load_firejson("cursor_base")
-        # """ Return: nested dict { '12345' : [ '@name' , 11 ], '67890' : [ '@name' , 22 ] } """
-
-        # 1. Build a fast lookup map of usernames we already know.
-        # Result: {"@name1": "12345", "@name2": "67890"}
-        # try:
-        #     known_usernames_to_ids = {
-        #         values[0]: key for key, values in previous_checked_ids.items()
-        #     }
-        # except IndexError:
-        #     logging.error("Database is corrupt. Rebuilding.")
-        #     known_usernames_to_ids = {}
-        #     # You might to clear previous_checked_ids here
-        #
-        # logging.info(f"Loaded {len(known_usernames_to_ids)} known chats from database.")
+                values["alerted_keys"] = ",".join(existing)
 
         db_was_updated = False
         _alerted_chats = set()  # deduplicate health alerts within one poll cycle
-
-        # TARGET_CHATS_LIST = [
-        #     chat.strip()
-        #     for chat in TARGET_CHATS.split(',')
-        #     if chat.strip()  # This ignores empty strings that result from trailing commas
-        # ]
-        # """ Convert string to list """
-        #
-        # KEYWORDS_LIST = [
-        #     chat.strip()
-        #     for chat in KEYWORDS.split(',')
-        #     if chat.strip()  # This ignores empty strings that result from trailing commas
-        # ]
-        # """ Convert string to list """
 
         for chat_ref in TARGET_CHATS_LIST:  # TARGET_CHATS: @name1, @name2..
             # --- Shutdown check during registration ---
@@ -238,7 +205,6 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                                 chat_ref, type(entity).__name__, entity.id)
                             continue
                     chat_id_str = str(entity.id)
-                    # await show_last_messages(entity, client, chat_ref) # only for test
 
                     # This logic handles two cases:
                     # A) A brand-new chat ID.
@@ -256,13 +222,18 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                         except Exception as e:
                             logging.error(f"A different error: {e}")
                         last_id = last_msg[0].id if last_msg else 0
-                        previous_checked_ids[chat_id_str] = [chat_ref, last_id]
+                        previous_checked_ids[chat_id_str] = {
+                            "ref": chat_ref,
+                            "last_processed_id": last_id,
+                            "alerted_keys": "",
+                            "schema_version": 1,
+                        }
                     else:
                         # --- Case B: Renamed chat ---
-                        old_ref = previous_checked_ids[chat_id_str][0]
+                        old_ref = previous_checked_ids[chat_id_str]["ref"]
                         logging.warning(
                             f"Username for {chat_id_str} changed from '{old_ref}' to '{chat_ref}'. Updating.")
-                        previous_checked_ids[chat_id_str][0] = chat_ref  # Update the username
+                        previous_checked_ids[chat_id_str]["ref"] = chat_ref  # Update the username
                     db_was_updated = True
                 else:
                     logging.debug(f"Chat '{chat_ref}' already in database. Skipping.")
@@ -295,11 +266,11 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 logger.warning("🛑 Shutdown (%s) — skipping remaining chats. Progress for completed chats saved.", stop_reason)
                 break
             # --- Guard: validate cursor entry structure ---
-            if not isinstance(values, (list, tuple)) or len(values) < 2:
+            if not isinstance(values, dict):
                 logger.error("Corrupt entry for chat '%s': %s. Skipping.", name, values)
                 continue
-            value0 = values[0]
-            value1 = values[1]
+            value0 = values["ref"]
+            value1 = values["last_processed_id"]
 
             # ----- Get the lastest message ID in a channel
             # A. Load previous state
@@ -368,13 +339,13 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     logging.info(
                         f"Chat {chat_id_str} renamed from '{value0}' to '{new_ref}'. Updating cursor."
                     )
-                    values[0] = new_ref
+                    values["ref"] = new_ref
                 else:
                     logging.info(
                         f"Chat {chat_id_str} ('{_safe_title(entity)}') has no public username. "
                         f"Will resolve by numeric ID from now on."
                     )
-                    values[0] = str(chat_id_str)
+                    values["ref"] = str(chat_id_str)
                 # --- Health alert: username lost, now tracking by numeric ID ---
                 if not _was_alerted(values, "username_lost"):
                     await send_health_alert(
@@ -429,19 +400,21 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     last_msg_date = messages[0].date      # newest
 
             for message in reversed(messages):
-                global COUNT_PROCESSED_MESSAGES, COUNT_KEYWORD_MATCHES, COUNT_ALERTS_SENT
-                COUNT_PROCESSED_MESSAGES += 1
+                count_processed += 1
                 message_text = message.text
 
                 if message_text:
-                    normalized_text = message_text.lower()
+                    # NFKC + casefold for locale-independent Unicode-aware matching.
+                    # Handles fullwidth Latin, composed/decomposed forms, and
+                    # case variants (e.g. "café" matches "CAFÉ" and "cafe\u0301").
+                    normalized_text = unicodedata.normalize("NFKC", message_text).casefold()
                     found_keywords = [kw for kw in KEYWORDS_LIST if kw in normalized_text]
 
                     logging.debug(f"Message ID {message.id}: {repr(message_text[:50])}...")
                     logging.debug(f"Matched keywords: {found_keywords}")
 
                     if found_keywords:
-                        COUNT_KEYWORD_MATCHES += 1
+                        count_matches += 1
                         # Save full message to Firestore (independent of alert success)
                         try:
                             await save_matched_message_to_firestore(message, found_keywords)
@@ -450,7 +423,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                         try:
                             await send_alert(message, found_keywords, session=http_session)
                             logging.info(f"Alarm sent successfully for message ID: {message.id}")
-                            COUNT_ALERTS_SENT += 1
+                            count_alerts += 1
                             last_acked_id = message.id  # only advance cursor on success
                         except Exception as alert_e:
                             logging.error(f"❌ ERROR sending alert for Message ID {message.id}: {alert_e}. "
@@ -494,7 +467,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 )
                 last_acked_id = current_last_message_id
 
-            previous_checked_ids[name][1] = last_acked_id
+            previous_checked_ids[name]["last_processed_id"] = last_acked_id
             cursors_to_write[name] = last_acked_id
 
             # --- Save cursor after EACH chat (incremental persistence) ---
@@ -509,7 +482,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
         date_range = ""
         if first_msg_date and last_msg_date:
             date_range = f" | Range: {first_msg_date.strftime('%d.%m.%Y')} → {last_msg_date.strftime('%d.%m.%Y')}"
-        logging.info(f"--- Stats: Processed= {COUNT_PROCESSED_MESSAGES} | Matches= {COUNT_KEYWORD_MATCHES} | Alerts= {COUNT_ALERTS_SENT}{date_range} ---")
+        logging.info(f"--- Stats: Processed= {count_processed} | Matches= {count_matches} | Alerts= {count_alerts}{date_range} ---")
 
         # --- Cross-contamination detection before saving ---
         if db_was_updated and cursors_to_write:

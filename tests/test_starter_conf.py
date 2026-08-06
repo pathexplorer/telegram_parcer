@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import sys
+import unicodedata
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,8 +64,8 @@ class TestFormingConfigurationHappyPath:
             chats=["@channel_a", "@channel_b", "1122334455"],
         )
         fsc = _make_fs_cursor_mock({
-            "111222333": ["@channel_a", 42],
-            "444555666": ["@channel_b", 99],
+            "111222333": {"ref": "@channel_a", "last_processed_id": 42, "alerted_keys": "", "schema_version": 1},
+            "444555666": {"ref": "@channel_b", "last_processed_id": 99, "alerted_keys": "", "schema_version": 1},
         })
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
@@ -74,8 +75,8 @@ class TestFormingConfigurationHappyPath:
         assert kw == ["urgent", "alert", "critical"]
         assert chats == ["@channel_a", "@channel_b", "1122334455"]
         assert cursors == {
-            "111222333": ["@channel_a", 42],
-            "444555666": ["@channel_b", 99],
+            "111222333": {"ref": "@channel_a", "last_processed_id": 42, "alerted_keys": "", "schema_version": 1},
+            "444555666": {"ref": "@channel_b", "last_processed_id": 99, "alerted_keys": "", "schema_version": 1},
         }
         assert known == {"@channel_a": "111222333", "@channel_b": "444555666"}
 
@@ -105,6 +106,49 @@ class TestFormingConfigurationHappyPath:
             kw, chats, _cur, _kn = forming_configuration()
         assert kw == ["urgent", "alert"]
         assert chats == ["@c1", "@c2"]
+
+    def test_unicode_keywords_are_normalized_and_deduplicated(self):
+        """Keywords with Unicode variants are NFKC-normalized, casefolded, and deduplicated.
+
+        Fullwidth Latin, composed/decomposed forms, and case variants should
+        collapse to the same normalized keyword.  Repeated normalized forms
+        are removed to avoid redundant substring checks in the polling loop.
+        """
+        # Mix of variants that should all collapse to "café" after NFKC + casefold:
+        #   "ＣＡＦÉ"  → fullwidth Latin
+        #   "Café"    → mixed case
+        #   "cafe\u0301" → decomposed (e + combining acute)
+        #   "CAFÉ"    → uppercase composed
+        #   "urgent"  → distinct keyword (should survive)
+        fsk = _make_fs_keywords_mock(
+            words=["ＣＡＦÉ", "  Caf\u00e9  ", "cafe\u0301", "CAF\u00c9", "urgent"],
+            chats=["@c1"],
+        )
+        fsc = _make_fs_cursor_mock({})
+
+        with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
+            from telegram.starter_conf import forming_configuration
+            kw, _chats, _cur, _kn = forming_configuration()
+
+        # All four café variants collapse to one normalized form, plus "urgent"
+        assert len(kw) == 2
+        assert "urgent" in kw
+        # The normalized form of café
+        assert unicodedata.normalize("NFKC", "café").casefold() in kw
+
+    def test_empty_keywords_after_normalization_are_filtered(self):
+        """Keywords that become empty after stripping/normalization are removed."""
+        fsk = _make_fs_keywords_mock(
+            words=["  ", "real_kw", "   "],  # whitespace-only entries
+            chats=["@c1"],
+        )
+        fsc = _make_fs_cursor_mock({})
+
+        with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
+            from telegram.starter_conf import forming_configuration
+            kw, _chats, _cur, _kn = forming_configuration()
+
+        assert kw == ["real_kw"]
 
 
 # ============================================================================
@@ -170,21 +214,29 @@ class TestFormingConfigurationErrors:
 class TestCursorValidation:
     """Detection of suspicious cursor entries during load."""
 
-    def test_malformed_cursor_structure_logs_warning(self, caplog):
-        """Cursor entry with only 1 element (should be >=2) logs warning."""
+    def test_malformed_cursor_structure_triggers_rebuild(self, caplog):
+        """A cursor entry that is neither a dict nor a list triggers a full rebuild.
+
+        The known_usernames_to_ids construction step iterates all entries and
+        accesses ``values["ref"]``.  If a value is a bare string (not a dict),
+        this raises TypeError, which is caught and the entire cursor_base is
+        cleared for safety — the corrupt entry is not left in a partial state.
+        """
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
-        fsc = _make_fs_cursor_mock({"123": ["@name"]})  # only 1 element
+        fsc = _make_fs_cursor_mock({"123": "not_a_dict_or_list"})  # un-migratable
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
             from telegram.starter_conf import forming_configuration
-            forming_configuration()
-        assert "suspicious cursor" in caplog.text.lower()
-        assert "malformed structure" in caplog.text.lower()
+            _kw, _ch, cursors, _kn = forming_configuration()
+        # A full rebuild was triggered — cursors should be empty
+        assert cursors == {}
+        assert "Database cursor_base is corrupt" in caplog.text
 
     def test_non_integer_cursor_logs_warning(self, caplog):
         """Cursor value that is not an int triggers a warning."""
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
-        fsc = _make_fs_cursor_mock({"123": ["@name", "not_a_number"]})
+        fsc = _make_fs_cursor_mock({"123": {"ref": "@name", "last_processed_id": "not_a_number",
+                                             "alerted_keys": "", "schema_version": 1}})
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
             from telegram.starter_conf import forming_configuration
@@ -194,7 +246,8 @@ class TestCursorValidation:
     def test_negative_cursor_logs_warning(self, caplog):
         """Negative cursor values trigger a warning."""
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
-        fsc = _make_fs_cursor_mock({"123": ["@name", -5]})
+        fsc = _make_fs_cursor_mock({"123": {"ref": "@name", "last_processed_id": -5,
+                                             "alerted_keys": "", "schema_version": 1}})
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
             from telegram.starter_conf import forming_configuration
@@ -204,7 +257,8 @@ class TestCursorValidation:
     def test_suspiciously_large_cursor_logs_warning(self, caplog):
         """Cursor > 2^31-1 (max Telegram message ID) triggers warning."""
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
-        fsc = _make_fs_cursor_mock({"123": ["@name", 3_000_000_000]})
+        fsc = _make_fs_cursor_mock({"123": {"ref": "@name", "last_processed_id": 3_000_000_000,
+                                             "alerted_keys": "", "schema_version": 1}})
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
             from telegram.starter_conf import forming_configuration
@@ -214,7 +268,8 @@ class TestCursorValidation:
     def test_valid_cursor_does_not_trigger_warnings(self, caplog):
         """A well-formed cursor entry should not produce suspicious-entry logs."""
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
-        fsc = _make_fs_cursor_mock({"123": ["@name", 42]})
+        fsc = _make_fs_cursor_mock({"123": {"ref": "@name", "last_processed_id": 42,
+                                             "alerted_keys": "", "schema_version": 1}})
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
             from telegram.starter_conf import forming_configuration
@@ -230,32 +285,42 @@ class TestLegacyMigration:
     """Migration of legacy nested-array alerted entries to CSV string format."""
 
     def test_legacy_list_alerted_migrated_to_csv(self, caplog):
-        """A cursor entry with alerted as a list should be migrated to CSV string."""
+        """A cursor entry with alerted as a nested list should be migrated to typed dict.
+
+        The nested-array alerted keys (v1 format) are first converted to CSV string,
+        then the whole positional-list entry is migrated to a typed dict (v3 format).
+        """
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
         fsc = _make_fs_cursor_mock({
-            "123": ["@name", 42, ["alert_key_1", "alert_key_2"]],  # legacy format
+            "123": ["@name", 42, ["alert_key_1", "alert_key_2"]],  # legacy v1 format
         })
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
             from telegram.starter_conf import forming_configuration
             _kw, _ch, cursors, _kn = forming_configuration()
 
-        # The legacy list should now be a CSV string
-        assert cursors["123"][2] == "alert_key_1,alert_key_2"
+        # Legacy entry should now be a typed dict
+        assert isinstance(cursors["123"], dict)
+        assert cursors["123"]["ref"] == "@name"
+        assert cursors["123"]["last_processed_id"] == 42
+        assert cursors["123"]["alerted_keys"] == "alert_key_1,alert_key_2"
+        assert cursors["123"]["schema_version"] == 1
         assert "Migrated" in caplog.text
 
     def test_no_migration_needed_for_modern_format(self, caplog):
-        """Modern CSV-string alerted format should not trigger migration."""
+        """Modern typed-dict format should not trigger any migration."""
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
         fsc = _make_fs_cursor_mock({
-            "123": ["@name", 42, "alert_key_1,alert_key_2"],  # already CSV
+            "123": {"ref": "@name", "last_processed_id": 42,
+                    "alerted_keys": "alert_key_1,alert_key_2", "schema_version": 1},
         })
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
             from telegram.starter_conf import forming_configuration
             _kw, _ch, cursors, _kn = forming_configuration()
 
-        assert cursors["123"][2] == "alert_key_1,alert_key_2"
+        assert cursors["123"]["alerted_keys"] == "alert_key_1,alert_key_2"
+        assert cursors["123"]["schema_version"] == 1
         assert "Migrated" not in caplog.text  # no migration needed
 
 
@@ -269,8 +334,8 @@ class TestKnownUsernamesConstruction:
     def test_builds_lookup_from_cursor_data(self):
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
         fsc = _make_fs_cursor_mock({
-            "111": ["@alpha", 1],
-            "222": ["@beta", 2],
+            "111": {"ref": "@alpha", "last_processed_id": 1, "alerted_keys": "", "schema_version": 1},
+            "222": {"ref": "@beta", "last_processed_id": 2, "alerted_keys": "", "schema_version": 1},
         })
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):
@@ -280,10 +345,10 @@ class TestKnownUsernamesConstruction:
         assert known == {"@alpha": "111", "@beta": "222"}
 
     def test_corrupt_entry_triggers_rebuild(self, caplog):
-        """If a cursor entry can't be unpacked, the lookup is rebuilt from scratch."""
+        """If a cursor entry is not a dict (can't access 'ref'), lookup is rebuilt."""
         fsk = _make_fs_keywords_mock(words=["kw"], chats=["@c"])
         fsc = _make_fs_cursor_mock({
-            "111": 12345,  # integer, not a list → TypeError on values[0]
+            "111": 12345,  # integer, not a dict → KeyError on values["ref"]
         })
 
         with patch(_FIRESTORE_PATCH_TARGET, side_effect=[fsk, fsc]):

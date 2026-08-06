@@ -9,9 +9,9 @@ Key features:
 
 - **Keyword Monitoring**: Scans messages for specific keywords.
 
-- **Firestore Message Archive**: Saves the **full, uncropped** text of every keyword-matched message to Firestore (`matched_messages` collection). Telegram alerts still show a 300-character excerpt with a deep link; Firestore holds the complete message for search and audit.
+- **Firestore Message Archive**: Saves the full message text of every keyword-matched message to Firestore (`matched_messages` collection), with automatic size truncation at ~900 KB to stay within Firestore document limits. Telegram alerts show a 300-character excerpt with a deep link; Firestore holds the complete message for search and audit.
 
-- **State Management**: Tracks the last checked message ID for each channel in **Google Cloud Firestore**, ensuring no messages are missed or processed twice (idempotency). Cursor is saved after **each chat** (not just at the end) to minimize data loss on interruption.
+- **State Management**: Tracks the last checked message ID for each channel in **Google Cloud Firestore**, providing **at-least-once** processing with idempotent archive keys. Cursor-per-chat checkpointing minimizes both missed messages and duplicate alerts on interruption. Cursor is saved after **each chat** (not just at the end) to minimize data loss on interruption.
 
 - **Dynamic Configuration**: Channel lists and keywords are managed in Firestore, allowing updates without redeploying the code.
 
@@ -41,7 +41,7 @@ Cloud Scheduler authenticates via the service account bound to the function.
 3.  **Optimization**: It maintains a local mapping of `username -> ID`. If a username changes, it automatically resolves the new ID and updates the database.
 4.  **Processing**: It fetches messages newer than the last checked ID.
 5.  **Matching**: Checks message content against keywords.
-6.  **Archiving**: If a keyword match is found, the **full**, uncropped message is saved to the `matched_messages` Firestore collection before the alert is sent. The save is independent — a Firestore write failure does **not** block the Telegram alert.
+6.  **Archiving**: If a keyword match is found, the full message (size-bounded at ~900 KB for Firestore document limits) is saved to the `matched_messages` Firestore collection before the alert is sent. The save is independent — a Firestore write failure does **not** block the Telegram alert.
 7.  **Alerting**: Sends a 300-character excerpt alert to the `NOTIFICATION_CHAT` with a deep link to the original message.
 8.  **State Update**: Updates Firestore with the new "last checked ID" **after each chat** (incremental persistence). On shutdown (signal, timeout, or flood-wait), the cursor is saved immediately so the next run resumes from the last safely-acked position.
 
@@ -53,6 +53,35 @@ Cloud Scheduler authenticates via the service account bound to the function.
 - **Firestore** (Native mode recommended).
 - **Secret Manager** API enabled.
 - A Telegram account (the bot will use your user session to read channels).
+
+---
+
+### Clone and Install
+
+```bash
+git clone <repository-url>
+cd telegram_parcer
+
+# Create virtual environment and install dependencies (including dev deps for tests)
+uv sync
+
+# Activate the environment
+source .venv/bin/activate
+```
+
+> **Dependency management**: This project uses [uv](https://docs.astral.sh/uv/) with
+> `pyproject.toml`. The private package `gcp-actions` is sourced from a local path
+> (`../gcp_actions`). For Cloud Build deployments, `requirements.txt` is kept in
+> sync as a fallback.
+>
+> If you need to install without `uv`, use:
+> ```bash
+> unset GOOGLE_APPLICATION_CREDENTIALS
+> TOKEN=$(gcloud auth print-access-token)
+> uv pip install -r requirements.txt \
+>   --index-url "https://oauth2accesstoken:$TOKEN@us-central1-python.pkg.dev/$PROJECT_ID/bike-data-magic/simple/" \
+>   --extra-index-url https://pypi.org/simple
+> ```
 
 ---
 
@@ -95,7 +124,7 @@ In the **Firestore Data** view, create the following documents inside a `telegra
 | `keywords` | `word` | String | `urgent, alert, critical` |
 | `chats` | `chats` | String | `@channel1, @channel2` |
 
-Do **not** create `cursor_base` — the application will create it automatically on first run.
+Do **not** create `cursor_base` or `matched_messages` — the application creates both automatically on first run.
 
 #### C. Get Telegram API Credentials
 
@@ -196,65 +225,6 @@ You should see log output showing that the bot is scanning channels for keywords
 
 ---
 
-### 1. Clone and Install
-```bash
-git clone <repository-url>
-cd telegram_parcer
-
-# Create virtual environment and install dependencies (including dev deps for tests)
-uv sync
-
-# Activate the environment
-source .venv/bin/activate
-```
-
-> **Dependency management**: This project uses [uv](https://docs.astral.sh/uv/) with
-> `pyproject.toml`. The private package `gcp-actions` is sourced from a local path
-> (`../gcp_actions`). For Cloud Build deployments, `requirements.txt` is kept in
-> sync as a fallback.
->
-> If you need to install without `uv`, use:
-> ```bash
-> unset GOOGLE_APPLICATION_CREDENTIALS
-> TOKEN=$(gcloud auth print-access-token)
-> uv pip install -r requirements.txt \
->   --index-url "https://oauth2accesstoken:$TOKEN@us-central1-python.pkg.dev/$PROJECT_ID/bike-data-magic/simple/" \
->   --extra-index-url https://pypi.org/simple
-> ```
-
-### 2. Configuration (Firestore)
-Create the following structure in your Firestore database:
-
-| Collection | Document | Field | Type | Description |
-|------------|----------|-------|------|-------------|
-| `telegram` | `keywords` | `word` | String (CSV) | Comma-separated list of keywords to search for. |
-| `telegram` | `chats` | `chats` | String (CSV) | Comma-separated list of channel usernames (e.g., `@channel1, @channel2`). |
-| `telegram` | `cursor_base` | *dynamic* | Map | Stores state. Don't create manually; the app will generate it. |
-| `matched_messages` | `{chat_id}_{message_id}` | *dynamic* | Map | Stores the **full**, uncropped content of every keyword-matched message. Created automatically — no manual setup needed. |
-
-### 3. Secrets (Secret Manager)
-Create a secret in Google Secret Manager (e.g., named `telegram-secrets`). The value should be a JSON string:
-```json
-{
-  "API_ID": "YOUR_API_ID",
-  "API_HASH": "YOUR_API_HASH",
-  "BOT_TOKEN": "YOUR_BOT_TOKEN",
-  "session_string": "YOUR_TELETHON_SESSION_STRING"
-}
-```
-> **How to get a `session_string`**: Follow **[Step E](#e-generate-a-telethon-session-string)** in the First-Time Bot Setup section above. The included script `telegram/local/get_session.py` handles the entire process.
-
-### 4. Local Environment Variables
-Create a `keys.env` file in the project root for local development:
-```env
-PROJECT_ID=your-gcp-project-id
-TELEGRAM_SECRETS=telegram-secrets
-NOTIFICATION_CHAT=-1001234567890
-# Optional: max seconds per poll run (avoids Telegram flood blocks)
-MAX_POLL_SECONDS=120
-```
-*replace `telegram-secrets` with the actual name of your secret in GCP.*
-
 ## Testing
 
 The project includes a comprehensive test suite (**81 tests**) built with `pytest`.
@@ -327,7 +297,7 @@ The project is ready for Google Cloud.
 
 ### Graceful Shutdown & Time-Limited Polling
 
-The poller supports **safe interruption** — whether you press Ctrl+C locally or Cloud Run sends `SIGTERM`, the cursor is saved to Firestore before the process exits. The next run resumes from the last saved position with **no duplicate alerts** and **no lost progress**.
+The poller supports **safe interruption** — whether you press Ctrl+C locally or Cloud Run sends `SIGTERM`, the cursor is saved to Firestore before the process exits. The next run resumes from the last saved position The next run resumes from the last safely-acked position, minimizing both duplicate alerts and lost progress.
 
 #### How it works
 
