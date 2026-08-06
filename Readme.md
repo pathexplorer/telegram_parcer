@@ -9,7 +9,7 @@ Key features:
 
 - **Keyword Monitoring**: Scans messages for specific keywords.
 
-- **Firestore Message Archive**: Saves the full message text of every keyword-matched message to Firestore (`matched_messages` collection), with automatic size truncation at ~900 KB to stay within Firestore document limits. Telegram alerts show a 300-character excerpt with a deep link; Firestore holds the complete message for search and audit.
+- **Firestore Message Archive**: Saves every keyword-matched message to Firestore (`matched_messages` collection), with automatic size truncation at ~900 KB to stay within Firestore document limits. Telegram alerts show a 300-character excerpt with a deep link; Firestore holds the size-bounded message (not guaranteed full fidelity beyond ~900 KB) for search and audit.
 
 - **State Management**: Tracks the last checked message ID for each channel in **Google Cloud Firestore**, providing **at-least-once** processing with idempotent archive keys. Cursor-per-chat checkpointing minimizes both missed messages and duplicate alerts on interruption. Cursor is saved after **each chat** (not just at the end) to minimize data loss on interruption.
 
@@ -17,7 +17,7 @@ Key features:
 
 - **Secure**: Credentials and secrets are managed via **Google Secret Manager**.
 
-- **Graceful Shutdown**: Handles `SIGINT` (Ctrl+C) and `SIGTERM` (Cloud Run timeout) — saves cursor state before exiting. Supports an optional time limit (`MAX_POLL_SECONDS`) to avoid Telegram flood blocks on long runs.
+- **Graceful Shutdown**: Handles `SIGINT` (Ctrl+C) and `SIGTERM` (Cloud Functions timeout) — saves cursor state before exiting. Supports an optional time limit (`MAX_POLL_SECONDS`) to avoid Telegram flood blocks on long runs.
 
 ## Architecture
 
@@ -27,7 +27,7 @@ Key features:
 - **Infrastructure**:
   - **Google Cloud Firestore**: Stores configuration (`keywords`, `chats`) and state (`cursor_base`).
   - **Google Secret Manager**: Securely stores API credentials.
-  - **Google Cloud Run / Functions**: Intended deployment environment.
+  - **Google Cloud Functions (Gen 1)**: Deployment environment.
 
 The project is deployed as a **Google Cloud Function (Gen 1)**, HTTP-triggered, with a 500 s timeout.
 It is invoked by **Cloud Scheduler** using an OIDC-authenticated request to the function's
@@ -44,6 +44,37 @@ Cloud Scheduler authenticates via the service account bound to the function.
 6.  **Archiving**: If a keyword match is found, the full message (size-bounded at ~900 KB for Firestore document limits) is saved to the `matched_messages` Firestore collection before the alert is sent. The save is independent — a Firestore write failure does **not** block the Telegram alert.
 7.  **Alerting**: Sends a 300-character excerpt alert to the `NOTIFICATION_CHAT` with a deep link to the original message.
 8.  **State Update**: Updates Firestore with the new "last checked ID" **after each chat** (incremental persistence). On shutdown (signal, timeout, or flood-wait), the cursor is saved immediately so the next run resumes from the last safely-acked position.
+
+### Architecture Diagram
+
+```mermaid
+flowchart TD
+    Scheduler["Cloud Scheduler<br/>(OIDC-authenticated HTTP)"]
+    GCF["Cloud Function (Gen 1)<br/>main(request)"]
+    SM["Secret Manager<br/>telegram-secrets"]
+    FS["Firestore"]
+    TGAPI["Telegram Bot API<br/>(aiohttp)"]
+    TGUser["Telegram Servers<br/>(Telethon / MTProto)"]
+    AlertChat["NOTIFICATION_CHAT<br/>(Telegram group)"]
+
+    Scheduler -->|"HTTP trigger"| GCF
+    GCF -->|"1. Load secrets"| SM
+    GCF -->|"2. Load config + cursor"| FS
+    GCF -->|"3. Poll messages (min_id=cursor)"| TGUser
+    GCF -->|"4a. Archive matched msg"| FS
+    GCF -->|"4b. Send alert excerpt"| TGAPI
+    TGAPI -->|"sendMessage"| AlertChat
+    GCF -->|"5. Save cursor per-chat"| FS
+
+    subgraph Failure modes
+        direction LR
+        F1["Archive write fails → alert still sent"]
+        F2["Alert send fails → cursor NOT advanced (retry next run)"]
+        F3["Crash after alert, before cursor → duplicate alert possible (at-least-once)"]
+    end
+```
+
+**Delivery guarantees**: The system provides **at-least-once** alerting. If the process crashes after a successful Bot API delivery but before the Firestore cursor is saved, the same message will be re-fetched and the alert duplicated on the next invocation. Conversely, if an alert fails, the cursor stops at the last successfully-acked message — no message is silently skipped. The archive key (`{chat_id}_{message_id}`) is naturally idempotent; duplicate writes to `matched_messages` are harmless.
 
 ## Setup & Installation
 
@@ -297,11 +328,11 @@ The project is ready for Google Cloud.
 
 ### Graceful Shutdown & Time-Limited Polling
 
-The poller supports **safe interruption** — whether you press Ctrl+C locally or Cloud Run sends `SIGTERM`, the cursor is saved to Firestore before the process exits. The next run resumes from the last saved position The next run resumes from the last safely-acked position, minimizing both duplicate alerts and lost progress.
+The poller supports **safe interruption** — whether you press Ctrl+C locally or Cloud Functions sends `SIGTERM`, the cursor is saved to Firestore before the process exits. The next run resumes from the last safely-acked position, minimizing both duplicate alerts and lost progress.
 
 #### How it works
 
-- **Ctrl+C (SIGINT)** or **Cloud Run timeout (SIGTERM)** → sets an internal shutdown flag.
+- **Ctrl+C (SIGINT)** or **Cloud Functions timeout (SIGTERM)** → sets an internal shutdown flag.
 - The polling loop checks this flag **between chats** and **after each message** inside a chat.
 - On shutdown, the cursor for the current chat (and all previous chats) is saved immediately.
 - Cursor is already saved **per-chat** during normal operation, so only the current chat's in-flight messages may be re-scanned on restart.
@@ -320,7 +351,7 @@ MAX_POLL_SECONDS=120 python main.py
 python main.py
 ```
 
-When the time limit is reached, the current message loop finishes its iteration, the cursor is saved, and the process exits cleanly. On Cloud Functions/Cloud Run, set the env var in your deployment:
+When the time limit is reached, the current message loop finishes its iteration, the cursor is saved, and the process exits cleanly. On Cloud Functions, set the env var in your deployment:
 
 ```yaml
 --set-env-vars=...,MAX_POLL_SECONDS=120

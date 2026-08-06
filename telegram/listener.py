@@ -361,15 +361,9 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                     db_was_updated = True
                 db_was_updated = True
 
-            # C. Get actual messages
+            # C. Get actual messages — fetches only messages newer than the cursor.
             try:
                 messages = await client.get_messages(msg_peer, min_id=current_last_message_id, limit=None)
-                """ Result: 
-                        1. empty space if no new
-                        1.1 Or metadata of new mess: Message(id=68, peer_id=PeerChannel(channel_id=12345), date=datetime.datetime(2025, 11, 4, 12, 7, 33, tzinfo=datetime.timezone.utc), message='{content_of_message}', out=False,...)
-                        2. total=29 is real quantity of messages + create channel message  
-                    min_id means: only message.id > current_last_message_id will get            
-                    """
                 if not messages:
                     logging.debug("No new messages found.")
                     continue
