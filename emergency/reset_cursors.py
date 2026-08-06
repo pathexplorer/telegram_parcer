@@ -74,6 +74,24 @@ async def _build_dialog_cache(client: TelegramClient) -> dict:
     return cache
 
 
+def _extract_cursor(values) -> int:
+    """Extract the last_processed_id from a cursor entry (legacy or typed)."""
+    if isinstance(values, dict):
+        return int(values.get("last_processed_id", 0))
+    if isinstance(values, (list, tuple)) and len(values) >= 2:
+        return int(values[1]) if isinstance(values[1], int) else 0
+    return 0
+
+
+def _extract_ref(values) -> str:
+    """Extract the ref string from a cursor entry (legacy or typed)."""
+    if isinstance(values, dict):
+        return str(values.get("ref", ""))
+    if isinstance(values, (list, tuple)) and len(values) >= 1:
+        return str(values[0])
+    return ""
+
+
 def _lookup_dialog(numeric_id_str: str, cache: dict):
     """Look up a Dialog in the cache by public numeric ID.
 
@@ -255,11 +273,11 @@ async def scan_and_optionally_reset(
 
         # --- 4a. Scan cursor entries first (authoritative numeric IDs) -------
         for chat_id_str, values in previous_checked_ids.items():
-            if not isinstance(values, (list, tuple)) or len(values) < 2:
+            if not isinstance(values, (dict, list, tuple)):
                 logger.warning("Corrupt cursor entry '%s': %s — skipping.", chat_id_str, values)
                 continue
-            stored_ref = values[0]
-            old_cursor = values[1]
+            stored_ref = _extract_ref(values)
+            old_cursor = _extract_cursor(values)
 
             logger.info("Scanning chat (cursor): ID=%s ref='%s'", chat_id_str, stored_ref)
 
@@ -331,7 +349,7 @@ async def scan_and_optionally_reset(
 
             title = _safe_title(entity)
             old_entry = previous_checked_ids.get(chat_id_str)
-            old_cursor = old_entry[1] if old_entry else 0
+            old_cursor = _extract_cursor(old_entry) if old_entry else 0
 
             logger.info("Scanning chat (new): ref='%s' id=%s title='%s'", chat_ref, chat_id_str, title)
 
@@ -421,7 +439,14 @@ async def scan_and_optionally_reset(
             # Preserve existing entries, update cursor
             old_entry = previous_checked_ids.get(cid)
             ref = r["_chat_ref"]
-            updated[cid] = [ref, latest]
+            # Write back as typed dict (schema_version from starter_conf)
+            from telegram.starter_conf import CURSOR_SCHEMA_VERSION
+            updated[cid] = {
+                "ref": ref,
+                "last_processed_id": latest,
+                "alerted_keys": old_entry.get("alerted_keys", "") if isinstance(old_entry, dict) else "",
+                "schema_version": CURSOR_SCHEMA_VERSION,
+            }
 
         if not updated:
             print("⚠️   Nothing to update (no valid chat data).")

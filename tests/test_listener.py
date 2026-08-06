@@ -163,7 +163,8 @@ class TestPollTelegramLifecycle:
         """Return a FirestoreMagic mock usable as both a class and instance."""
         instance = MagicMock()
         instance.load_firejson.return_value = {
-            "123456789": ["@test_channel", 42],
+            "123456789": {"ref": "@test_channel", "last_processed_id": 42,
+                          "alerted_keys": "", "schema_version": 1},
         }
         instance.backup_document.return_value = None
         instance.prune_old_backups.return_value = None
@@ -265,7 +266,7 @@ class TestPollTelegramLifecycle:
             from telegram.listener import poll_telegram; asyncio.run(poll_telegram(
                 KEYWORDS_LIST=["urgent"],
                 TARGET_CHATS_LIST=[],  # empty target list
-                previous_checked_ids={"bad_chat": ["@name"]},  # only 1 element!
+                previous_checked_ids={"bad_chat": "not_a_dict"},  # corrupt format!
                 known_usernames_to_ids={},
             ))
         assert "TARGET_CHATS_LIST is empty" in caplog.text

@@ -157,7 +157,7 @@ class TestGCFDeployErrors:
         fs_mock = MagicMock()
         fs_mock.load_firejson.side_effect = [
             {"word": ["kw"], "chats": ["@test"]},
-            {"123": ["@test", 0]},
+            {"123": {"ref": "@test", "last_processed_id": 0, "alerted_keys": "", "schema_version": 1}},
         ]
         fs_mock.unpack_array_to_csv_string.side_effect = (
             lambda doc, field: ",".join(str(x) for x in doc.get(field, []))

@@ -60,7 +60,7 @@ def _make_secret_manager_mock() -> MagicMock:
 def _make_firestore_mock(
     keywords: list[str] | None = None,
     chats: list[str] | None = None,
-    cursors: dict[str, list[Any]] | None = None,
+    cursors: dict[str, dict[str, Any]] | None = None,
 ) -> MagicMock:
     """Return a FirestoreMagic mock with configurable keywords/chats/cursor data."""
     fs = MagicMock()
@@ -72,7 +72,14 @@ def _make_firestore_mock(
     #   2nd → "cursor_base" doc
     fs.load_firejson.side_effect = [
         {"word": kw, "chats": ch},
-        cursors or {"123456789": ["@test_channel", 42]},
+        cursors or {
+            "123456789": {
+                "ref": "@test_channel",
+                "last_processed_id": 42,
+                "alerted_keys": "",
+                "schema_version": 1,
+            }
+        },
     ]
 
     # unpack_array_to_csv_string is used to convert Firestore arrays → CSV
