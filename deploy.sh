@@ -33,6 +33,29 @@ done
 _FUNCTION_NAME=$(grep '_FUNCTION_NAME:' start.yaml | head -1 | awk '{print $2}')
 _REGION=$(grep '_REGION:' start.yaml | head -1 | awk '{print $2}')
 _GCP_PROJECT_ID=$(grep '_GCP_PROJECT_ID:' start.yaml | head -1 | awk '{print $2}' | tr -d '"')
+_SERVICE_ACCOUNT=$(grep '_SERVICE_ACCOUNT:' start.yaml | head -1 | awk '{print $2}' | tr -d '"')
+_ARTIFACT_REPO=$(grep '_ARTIFACT_REPO:' start.yaml | head -1 | awk '{print $2}' | tr -d '"')
+
+# Auto-detect empty values from gcloud config (fail early if still missing).
+if [[ -z "$_GCP_PROJECT_ID" ]]; then
+    _GCP_PROJECT_ID=$(gcloud config get-value project 2>/dev/null) || true
+fi
+if [[ -z "$_GCP_PROJECT_ID" ]]; then
+    echo "❌ GCP_PROJECT_ID is not set. Run: gcloud config set project PROJECT_ID"
+    exit 1
+fi
+
+# Auto-detect service account from the documented pattern (README Step B).
+if [[ -z "$_SERVICE_ACCOUNT" ]]; then
+    _CANDIDATE="tele-looker-wizard@${_GCP_PROJECT_ID}.iam.gserviceaccount.com"
+    if gcloud iam service-accounts describe "$_CANDIDATE" --project="$_GCP_PROJECT_ID" &>/dev/null; then
+        _SERVICE_ACCOUNT="$_CANDIDATE"
+    else
+        echo "⚠️  Service account '$_CANDIDATE' not found. Deploying with default compute SA."
+        echo "   Create it first: gcloud iam service-accounts create tele-looker-wizard ..."
+        echo "   (See README → Setup & Installation → Cloud Deployment → Step B)"
+    fi
+fi
 
 FUNCTION_URL="https://${_REGION}-${_GCP_PROJECT_ID}.cloudfunctions.net/${_FUNCTION_NAME}"
 
@@ -63,8 +86,18 @@ echo "════════════════════════�
 echo "  🚀 Submitting Cloud Build..."
 echo "═══════════════════════════════════════════════════════════════"
 
+# ── Build substitution flags (only pass non-empty values) ────────────
+_SUBSTITUTIONS="_GCP_PROJECT_ID=${_GCP_PROJECT_ID}"
+if [[ -n "$_SERVICE_ACCOUNT" ]]; then
+    _SUBSTITUTIONS+=",_SERVICE_ACCOUNT=${_SERVICE_ACCOUNT}"
+fi
+if [[ -n "$_ARTIFACT_REPO" ]]; then
+    _SUBSTITUTIONS+=",_ARTIFACT_REPO=${_ARTIFACT_REPO}"
+fi
+
 gcloud builds submit \
     --config start.yaml \
+    --substitutions=${_SUBSTITUTIONS} \
     --gcs-source-staging-dir=gs://handy-cache-476919-t4_self_cloudbuild/source
 
 # ── Post-deploy smoke test ────────────────────────────────────────────

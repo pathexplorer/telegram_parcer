@@ -28,7 +28,7 @@ substitutions:
   _RUNTIME: python312
   _TELEGRAM_SECRETS: "telegram-secrets"
   _TAG_NAME: latest
-  _GCP_PROJECT_ID: ""                           # supplied by build trigger
+  _GCP_PROJECT_ID: ""                           # auto-detected by deploy.sh, or set by build trigger
   _LOGGING_LEVEL: INFO
   _ARTIFACT_REPO: ""                            # supplied by build trigger
   # Leave 50 s buffer below the Gen 1 HTTP function limit (540 s) for
@@ -51,7 +51,7 @@ steps:
   - --memory=512MB
   - --max-instances=1
   - --service-account=$_SERVICE_ACCOUNT
-  - --set-env-vars=GCP_PROJECT_ID=$_GCP_PROJECT_ID,CODE_VERSION=$_TAG_NAME,TELEGRAM_SECRETS=$_TELEGRAM_SECRETS,LOGGING_LEVEL=$_LOGGING_LEVEL,MAX_POLL_SECONDS=$_MAX_POLL_SECONDS
+  - --set-env-vars=GCP_PROJECT_ID=$_GCP_PROJECT_ID,CODE_VERSION=$_TAG_NAME,TELEGRAM_SECRETS=$_TELEGRAM_SECRETS,LOGGING_LEVEL=$_LOGGING_LEVEL,MAX_POLL_SECONDS=$_MAX_POLL_SECONDS,HEARTBEAT_MAX_AGE_SECONDS=7200
   - --set-build-env-vars=PIP_EXTRA_INDEX_URL=https://us-central1-python.pkg.dev/$_GCP_PROJECT_ID/$_ARTIFACT_REPO/simple/
 
 # Gen 1 HTTP function max timeout is 540 s.
