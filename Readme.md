@@ -19,6 +19,10 @@ Key features:
 
 - **Graceful Shutdown**: Handles `SIGINT` (Ctrl+C) and `SIGTERM` (Cloud Functions timeout) — saves cursor state before exiting. Supports an optional time limit (`MAX_POLL_SECONDS`) to avoid Telegram flood blocks on long runs.
 
+- **Health Monitoring**: Writes a heartbeat to Firestore (`telegram/heartbeat`) after every successful poll — an independent health signal that works even when Telegram Bot API is down. Exposes a `?health=1` endpoint for uptime checks and Cloud Monitoring integration.
+
+- **Cloud Logging Alerts**: Structured CRITICAL-level logging on all failure paths (startup, runtime, heartbeat) enables Cloud Logging-based alert policies — you get notified by email if the function fails, even if Telegram itself is unreachable.
+
 ## Architecture
 
 - **Language**: Python 3.12
@@ -44,6 +48,7 @@ Cloud Scheduler authenticates via the service account bound to the function.
 6.  **Archiving**: If a keyword match is found, the full message (size-bounded at ~900 KB for Firestore document limits) is saved to the `matched_messages` Firestore collection before the alert is sent. The save is independent — a Firestore write failure does **not** block the Telegram alert.
 7.  **Alerting**: Sends a 300-character excerpt alert to the `NOTIFICATION_CHAT` with a deep link to the original message.
 8.  **State Update**: Updates Firestore with the new "last checked ID" **after each chat** (incremental persistence). On shutdown (signal, timeout, or flood-wait), the cursor is saved immediately so the next run resumes from the last safely-acked position.
+9.  **Heartbeat**: Writes a success/failure timestamp to `telegram/heartbeat` — an independent health signal for external monitoring.
 
 ### Architecture Diagram
 
@@ -93,6 +98,79 @@ it sees the same session connecting from a different IP/endpoint. This causes
   simultaneously will cause Telethon to block the session string (same as two cloud
   instances colliding). Always pause the scheduler before local testing, and resume it
   afterwards (see [Local Mode](#local-mode) for the commands).
+
+---
+
+## Monitoring & Alerting
+
+The function provides three independent ways to check its health — none of which
+depend on the Telegram Bot API (so you're alerted even if Telegram itself is down).
+
+### 1. Firestore Heartbeat (Automatic)
+
+After every successful poll, the function writes a timestamp to Firestore at
+`telegram/heartbeat`.  If the poll fails, a failure entry is written instead.
+
+| Field | Description |
+|-------|-------------|
+| `last_success_ts` | Unix timestamp of last successful poll |
+| `last_success_date` | ISO 8601 date of last successful poll |
+| `last_failure_ts` | Unix timestamp of last failure (only present on errors) |
+| `last_failure_detail` | Error description (only present on errors) |
+| `code_version` | Deployed code version tag |
+| `function_name` | Cloud Function name |
+
+Check it in the Firestore Console → `telegram/heartbeat` document.
+
+### 2. Health Endpoint
+
+The function exposes query parameters for health checks:
+
+```bash
+# Quick config validation (secrets + Firestore only, no polling)
+curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  "https://REGION-PROJECT.cloudfunctions.net/telegramPoller?check=1"
+
+# Full health check — also verifies heartbeat is recent
+curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  "https://REGION-PROJECT.cloudfunctions.net/telegramPoller?health=1"
+```
+
+| Endpoint | Returns | What it checks |
+|----------|---------|----------------|
+| `?check=1` | 200 / 500 | Secrets + Firestore config load correctly |
+| `?health=1` | 200 / 500 | Above + last success heartbeat is within `HEARTBEAT_MAX_AGE_SECONDS` (default 7200 s) |
+
+Use `?health=1` with Cloud Monitoring Uptime Checks or any external monitoring service
+(e.g. healthchecks.io, Better Uptime, Pingdom).
+
+### 3. Cloud Logging Alert (Email/SMS)
+
+All failure paths log structured CRITICAL messages with identifiable prefixes:
+
+| Prefix | Meaning |
+|--------|---------|
+| `STARTUP_FAILURE` | Secret Manager, import, or Firestore config failure |
+| `RUNTIME_FAILURE` | Unhandled exception in the polling loop |
+| `HEALTH_CHECK_FAILED` | Heartbeat age exceeds threshold |
+
+**Set up an alert** that emails you when these appear:
+
+```bash
+# 1. Create an email notification channel
+gcloud beta monitoring channels create \
+  --display-name="TelegramPoller Critical Alerts" \
+  --type=email \
+  --channel-labels=email_address=YOUR_EMAIL@gmail.com
+
+# 2. Create the alert policy (using the bundled alert_policy.json)
+gcloud alpha monitoring policies create \
+  --policy-from-file=alert_policy.json \
+  --notification-channels=CHANNEL_ID_FROM_STEP_1
+```
+
+> The `alert_policy.json` file is included in the repository and pre-configured
+> for the `telegramPoller` function.  See [Monitoring Setup](alert_policy.json).
 
 ## Setup & Installation
 
@@ -448,14 +526,43 @@ gcloud iam service-accounts add-iam-policy-binding $SERVICE_ACCOUNT \
   --role="roles/iam.serviceAccountUser"
 ```
 
-#### D. Deploy via Cloud Build (YAML)
+#### D. Deploy
+
+**Recommended — use the convenience script** (`deploy.sh`):
+
+```bash
+# Full deploy: tests → build → smoke test → live verification
+./deploy.sh
+
+# Skip stages as needed:
+./deploy.sh --skip-tests      # deploy without running tests
+./deploy.sh --skip-smoke      # skip post-deploy config check
+./deploy.sh --skip-verify     # skip heartbeat verification wait
+```
+
+The script automatically:
+- Detects your **GCP project ID** from `gcloud config`
+- Finds the **service account** (`tele-looker-wizard@...`) documented in the README
+- Passes all required substitutions to Cloud Build
+- After deploy, **waits for the scheduler to fire** and polls logs until the heartbeat confirms the function is alive
+
+You'll see output like:
+
+```
+✅ Deploy complete.
+
+🔍 Live verification — waiting for heartbeat confirmation...
+   ✅ LIVE VERIFICATION PASSED — function is working!
+   💓 Heartbeat written: success at 2026-08-07T07:15:58
+```
+
+**Manual deploy** (if you prefer to control each step):
 
 ```bash
 gcloud builds submit --config start.yaml \
+  --substitutions=_GCP_PROJECT_ID=$PROJECT_ID,_SERVICE_ACCOUNT=$SERVICE_ACCOUNT,_ARTIFACT_REPO=$AR_REPO \
   --gcs-source-staging-dir=gs://${PROJECT_ID}_self_cloudbuild/source
 ```
-
-This builds and deploys the Cloud Function using the pipeline defined in `start.yaml`.
 
 #### E. Set Up Cloud Scheduler
 
@@ -550,6 +657,9 @@ When the time limit is reached, the current message loop finishes its iteration,
 telegram_parcer/
 ├── main.py                  # Entry point — initializes config and runs the poller
 ├── run_local.sh             # Safe local runner — pauses/resumes Cloud Scheduler automatically
+├── deploy.sh                # Deploy script — tests → build → smoke test → live verify
+├── start.yaml               # Cloud Build pipeline definition
+├── alert_policy.json        # Cloud Monitoring alert policy for CRITICAL errors
 ├── pyproject.toml           # Project metadata, dependencies, pytest & coverage config
 ├── requirements.txt         # Pinned deps for Cloud Build (fallback)
 ├── keys.env                 # Local environment variables (git-ignored)
@@ -667,3 +777,40 @@ Changes take effect on the next poll cycle — no redeployment needed.
 | `session_string` | Used by Telethon to authenticate as your **user account** to read channels. | Your personal Telegram account. |
 
 The bot token cannot read messages from channels — that's why a user-level Telethon session is required.
+
+---
+
+### How do I know if the function is currently working?
+
+Four independent ways, none of which depend on Telegram being reachable:
+
+```bash
+# 1. Health endpoint (fast — checks config + heartbeat age)
+curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  "https://us-central1-PROJECT.cloudfunctions.net/telegramPoller?health=1"
+
+# 2. Read heartbeat directly from Firestore
+gcloud firestore documents describe telegram/heartbeat --project=$PROJECT_ID
+
+# 3. Check logs for heartbeat confirmation
+gcloud functions logs read telegramPoller --region=us-central1 --limit=5 \
+  | grep -E "Heartbeat|FAILURE"
+
+# 4. Run deploy.sh — waits for live heartbeat after deploy
+./deploy.sh
+```
+
+See [Monitoring & Alerting](#monitoring--alerting) for full details on setting up automated alerts.
+
+---
+
+### What environment variables does the function use?
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `GCP_PROJECT_ID` | *(required)* | GCP project ID |
+| `TELEGRAM_SECRETS` | `telegram-secrets` | Secret Manager secret name |
+| `MAX_POLL_SECONDS` | `450` | Max poll duration before self-exit |
+| `HEARTBEAT_MAX_AGE_SECONDS` | `7200` | Max heartbeat age for `?health=1` |
+| `LOGGING_LEVEL` | `INFO` | Python log level |
+| `CODE_VERSION` | *(auto)* | Deployed code version tag |
