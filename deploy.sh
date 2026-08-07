@@ -4,9 +4,10 @@
 # post-deploy smoke test.
 #
 # Usage:
-#   ./deploy.sh                     # run tests, deploy, smoke test
-#   ./deploy.sh --skip-tests        # deploy without running tests
-#   ./deploy.sh --skip-smoke        # skip post-deploy smoke test
+#   ./deploy.sh                     # tests → deploy → smoke test → live verify
+#   ./deploy.sh --skip-tests        # skip tests
+#   ./deploy.sh --skip-smoke        # skip post-deploy config check
+#   ./deploy.sh --skip-verify       # skip live heartbeat verification
 #
 # Requires:
 #   - pytest installed in .venv/
@@ -21,10 +22,12 @@ cd "$SCRIPT_DIR"
 # ── Parse flags ──────────────────────────────────────────────────────
 SKIP_TESTS=false
 SKIP_SMOKE=false
+SKIP_VERIFY=false
 for arg in "$@"; do
     case "$arg" in
         --skip-tests) SKIP_TESTS=true ;;
         --skip-smoke) SKIP_SMOKE=true ;;
+        --skip-verify) SKIP_VERIFY=true ;;
     esac
 done
 
@@ -148,3 +151,85 @@ echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo "  ✅ Deploy complete."
 echo "═══════════════════════════════════════════════════════════════"
+
+# ── Post-deploy live verification ─────────────────────────────────────
+if [[ "$SKIP_VERIFY" == false ]]; then
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "  🔍 Live verification — triggering function & waiting for"
+    echo "     heartbeat confirmation..."
+    echo "═══════════════════════════════════════════════════════════════"
+
+    # Re-use the token from smoke test, or get a fresh one.
+    if [[ -z "${IDENTITY_TOKEN:-}" ]]; then
+        IDENTITY_TOKEN=$(gcloud auth print-identity-token \
+            --audiences="$FUNCTION_URL" 2>/dev/null) || true
+    fi
+
+    if [[ -z "$IDENTITY_TOKEN" ]]; then
+        echo "  ⚠️  No identity token — skipping live verification."
+    else
+        # Read the poll timeout from start.yaml to know how long to wait.
+        _MAX_POLL=$(grep '_MAX_POLL_SECONDS:' start.yaml | head -1 | awk '{print $2}' | tr -d '"')
+        _MAX_POLL=${_MAX_POLL:-450}
+        # Wait for the scheduler to fire + poll time + buffer.
+        _VERIFY_TIMEOUT=$(( _MAX_POLL + 600 ))   # up to ~17 min
+
+        echo "  → Waiting for Cloud Scheduler to trigger the function..."
+        echo "     (polling logs, timeout: ${_VERIFY_TIMEOUT}s)"
+
+        _VERIFY_START=$(date +%s)
+        _VERIFY_RESULT="timeout"
+        while true; do
+            _NOW=$(date +%s)
+            _ELAPSED=$(( _NOW - _VERIFY_START ))
+            if (( _ELAPSED >= _VERIFY_TIMEOUT )); then
+                echo ""
+                echo "  ⏰ Timed out after ${_ELAPSED}s — no heartbeat detected."
+                echo "     The scheduler may not have fired yet, or the function"
+                echo "     is failing silently. Check logs manually:"
+                echo "       gcloud functions logs read ${_FUNCTION_NAME} --region=${_REGION} --limit=10"
+                _VERIFY_RESULT="timeout"
+                break
+            fi
+
+            # Fetch recent logs and look for heartbeat markers.
+            _LOGS=$(gcloud functions logs read "$_FUNCTION_NAME" \
+                --region="$_REGION" --limit=30 --min-log-level=INFO 2>/dev/null || true)
+
+            if echo "$_LOGS" | grep -q "Heartbeat written: success"; then
+                _HEARTBEAT_LINE=$(echo "$_LOGS" | grep "Heartbeat written: success" | head -1)
+                echo ""
+                echo "  ✅ LIVE VERIFICATION PASSED — function is working!"
+                echo "  ${_HEARTBEAT_LINE}"
+                _VERIFY_RESULT="ok"
+                break
+            fi
+
+            if echo "$_LOGS" | grep -qE "Failure heartbeat|STARTUP_FAILURE|RUNTIME_FAILURE|HEALTH_CHECK_FAILED"; then
+                _FAIL_LINES=$(echo "$_LOGS" | grep -E "Failure heartbeat|STARTUP_FAILURE|RUNTIME_FAILURE|HEALTH_CHECK_FAILED")
+                echo ""
+                echo "  ❌ LIVE VERIFICATION FAILED — function reported errors:"
+                echo "  -------------------------------------------"
+                echo "$_FAIL_LINES" | head -10
+                echo "  -------------------------------------------"
+                echo "  Full logs: gcloud functions logs read ${_FUNCTION_NAME} --region=${_REGION}"
+                _VERIFY_RESULT="fail"
+                break
+            fi
+
+            # Show progress every 15 seconds.
+            _MOD=$(( _ELAPSED % 15 ))
+            if (( _MOD == 0 )) && (( _ELAPSED > 0 )); then
+                _LAST_LOG=$(echo "$_LOGS" | head -1 | cut -c1-120)
+                echo "  ⏳ Waiting... (${_ELAPSED}s elapsed)  Last: ${_LAST_LOG:-"(no recent logs)"}"
+            fi
+
+            sleep 5
+        done
+
+        if [[ "$_VERIFY_RESULT" == "fail" ]]; then
+            exit 1
+        fi
+    fi
+fi
