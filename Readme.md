@@ -23,6 +23,54 @@ Key features:
 
 - **Cloud Logging Alerts**: Structured CRITICAL-level logging on all failure paths (startup, runtime, heartbeat) enables Cloud Logging-based alert policies — you get notified by email if the function fails, even if Telegram itself is unreachable.
 
+## User Story
+
+### The Problem
+
+Many public Telegram channels publish time-sensitive information — announcements, offers,
+alerts, market movements — but manually monitoring dozens of channels is impractical.
+You need a way to **watch many channels at once** and get **notified instantly** when
+a message matches your criteria, without scrolling endlessly or relying on Telegram's
+built-in notification system (which notifies on every message, not just relevant ones).
+
+### What This Project Solves
+
+This tool answers a single focused question: *"Did any of my target channels post
+something containing my keywords since the last time I checked?"*
+
+- **Define once, run forever**: Set your keywords and channel list in Firestore, and
+  the poller continuously scans for matches — no manual intervention needed.
+- **Immediate, actionable alerts**: When a keyword hits, you get a Telegram notification
+  with a 300-character excerpt and a deep link straight to the original message.
+- **Full audit trail**: Every matched message is archived to Firestore, so you can
+  search and review historical matches at any time.
+
+### Scalability & Reusability
+
+The project is designed as a **self-contained microservice** — a single Cloud Function
+that does one job well. This makes it naturally composable in larger pipelines:
+
+| Pattern | How it fits |
+|---------|-------------|
+| **Pub/Sub fan-out** | Replace the Telegram alert with a Pub/Sub publish call, and downstream services (data pipelines, ML models, dashboards) can consume matched messages in real time. |
+| **Multi-keyword verticals** | Deploy separate instances with different keyword sets for different teams or use cases (e.g., one for security alerts, another for market intelligence) — each instance writes to its own Firestore collection or Pub/Sub topic. |
+| **Multi-platform extension** | The `message_store.py` serialization and the Firestore archive layer are platform-agnostic. A Discord or Slack listener could reuse the same matching, archiving, and alerting pipeline by swapping only the listener module. |
+| **Sink-agnostic output** | The `send.py` module is the only Bot API dependency. Swap it for a webhook, a BigQuery stream, or a custom HTTP endpoint — the core poll → match → archive loop stays unchanged. |
+
+**Scaling limits to be aware of:**
+
+- **Single-instance by design**: Telethon sessions cannot be shared across concurrent
+  instances (see [Single-Instance Constraint](#️-important-single-instance-constraint)).
+  For high-throughput channels with hundreds of messages per second, a single Cloud Function
+  may become a bottleneck. In that scenario, partition channels across multiple session
+  strings (multiple Telegram user accounts) and deploy one function per session.
+- **Firestore document size**: Individual matched messages are capped at ~900 KB. If you
+  need guaranteed full-fidelity archives for very large messages, consider offloading
+  storage to Cloud Storage or BigQuery via the sink-agnostic output pattern above.
+- **Polling, not streaming**: The function is invoked on a schedule (e.g., every 10 minutes),
+  not continuously. For near-real-time requirements, increase the scheduler frequency and
+  lower `MAX_POLL_SECONDS` — but stay mindful of Telegram's rate limits.
+
 ## Architecture
 
 - **Language**: Python 3.12
@@ -315,6 +363,12 @@ In the **Google Cloud Console → Secret Manager**, create a new secret (e.g. na
   "session_string": "the_very_long_session_string_from_step_E"
 }
 ```
+
+> **Why a single monolithic secret?** Google Cloud Secret Manager's free tier includes
+> only **6 active secret versions** per account. Since other projects in this GCP project
+> already use 5 of those slots, all Telegram credentials are bundled into one JSON secret
+> to stay within the free tier limit. If you have spare secret quota, feel free to split
+> each credential into its own secret — just update `project_env/config.py` accordingly.
 
 Make sure the Service Account from step A has the **Secret Manager Secret Accessor** role on this secret.
 
