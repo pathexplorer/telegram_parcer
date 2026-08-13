@@ -1,7 +1,7 @@
 {
   "displayName": "telegramPoller — CRITICAL errors",
   "documentation": {
-    "content": "The telegramPoller Cloud Function logged a CRITICAL-level error. This means the function has crashed or cannot start (e.g. Secret Manager failure, Firestore failure, import error, or unhandled polling exception). Check Cloud Logging for the full traceback.",
+    "content": "The telegramPoller Gen 2 Cloud Function logged a CRITICAL-level error (logged under resource type cloud_run_revision / service telegrampoller). This means the function has crashed or cannot start (e.g. Secret Manager failure, Firestore failure, import error, or unhandled polling exception). Check Cloud Logging for the full traceback.",
     "mimeType": "text/markdown"
   },
   "combiner": "OR",
@@ -9,7 +9,7 @@
     {
       "displayName": "Critical log entries from telegramPoller",
       "conditionMatchedLog": {
-        "filter": "resource.type=\"cloud_function\" AND resource.labels.function_name=\"telegramPoller\" AND severity>=CRITICAL"
+        "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"telegrampoller\" AND severity>=CRITICAL"
       }
     }
   ],

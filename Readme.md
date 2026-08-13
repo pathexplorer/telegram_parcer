@@ -218,7 +218,10 @@ gcloud alpha monitoring policies create \
 ```
 
 > The `alert_policy.json` file is included in the repository and pre-configured
-> for the `telegramPoller` function.  See [Monitoring Setup](alert_policy.json).
+> for the `telegramPoller` function. This is a Gen 2 Cloud Function, so its
+> CRITICAL logs appear under `resource.type="cloud_run_revision"` with
+> `resource.labels.service_name="telegrampoller"` — the alert filter matches
+> that resource type. See [Monitoring Setup](alert_policy.json).
 
 ## Setup & Installation
 
