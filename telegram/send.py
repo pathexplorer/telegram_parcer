@@ -1,11 +1,17 @@
 import asyncio
 import logging
+import re
 
 import aiohttp
 
 from project_env.config import BOT_TOKEN, NOTIFICATION_CHAT
 
 logger = logging.getLogger(__name__)
+
+# Escape characters that have meaning in Telegram Markdown so untrusted raw
+# message text / identifiers can't break the surrounding message formatting.
+_MARKDOWN_CHARS = re.compile(r"([_*\[\]()~`>#+\-=|{}.!])")
+_MARKDOWN_ESCAPE = r"\\\1"
 
 # ── HTTP client defaults ──────────────────────────────────────────────────
 _DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=10)
@@ -15,6 +21,16 @@ _MAX_RETRIES = 3
 def _is_transient(status: int) -> bool:
     """Return True for status codes that are safe to retry."""
     return status in (429, 500, 502, 503, 504)
+
+
+def _md_escape(text: str) -> str:
+    """Escape Telegram Markdown metacharacters in an untrusted string.
+
+    Backslashes are escaped first so any pre-existing escapes/paths in the
+    source text stay inert, then every Markdown metacharacter is escaped.
+    """
+    escaped = text.replace("\\", "\\\\")
+    return _MARKDOWN_CHARS.sub(_MARKDOWN_ESCAPE, escaped)
 
 
 async def send_bot_notification(
@@ -64,20 +80,32 @@ async def send_bot_notification(
                 "🌐 Bot API network error (attempt %d/%d): %s",
                 attempt, _MAX_RETRIES, exc,
             )
+        except RuntimeError as exc:
+            # Permanent error raised by _post_once. Only a malformed-Markdown
+            # error is recoverable (resend as plain text); anything else raises
+            # immediately exactly as before.
+            if "can't parse entities" not in str(exc):
+                raise
+            last_error = exc
 
         if last_error is None:
             return  # success
 
-        if attempt < _MAX_RETRIES:
-            delay = 2 ** attempt  # 2, 4, 8 seconds
-            logging.info("🔁 Retrying in %d s…", delay)
-            await asyncio.sleep(delay)
-
-    # All retries exhausted
-    logging.critical("❌ Bot API delivery failed after %d attempts.", _MAX_RETRIES)
-    raise RuntimeError(
-        f"Bot API delivery failed after {_MAX_RETRIES} attempts"
-    ) from last_error
+        # fallthrough above guaranteed a Markdown parse error:
+        logging.warning("⚠️  Message failed Markdown parsing; resending as plain text.")
+        plain_payload = dict(payload)
+        plain_payload.pop("parse_mode", None)
+        try:
+            if session is None:
+                async with aiohttp.ClientSession(timeout=_DEFAULT_TIMEOUT) as s:
+                    last_error = await _post_once(s, bot_url, plain_payload)
+            else:
+                last_error = await _post_once(session, bot_url, plain_payload)
+        except RuntimeError as exc:
+            last_error = exc
+        if last_error is None:
+            return  # plain text delivered successfully
+        raise RuntimeError(f"Bot API delivery failed after {_MAX_RETRIES} attempts") from last_error
 
 
 async def _post_once(
@@ -129,8 +157,8 @@ async def send_alert(message, keywords_found, *, session: aiohttp.ClientSession 
     alert_message = (
         f"🚨 **KEYWORD ALERT!** 🚨\n"
         f"**Keywords:** {', '.join(keywords_found)}\n"
-        f"**Group:** `{chat_identifier}`\n"
-        f"**Message:** {message.text[:300].strip()}...\n"  # Added .strip() for clean excerpt
+        f"**Group:** `{_md_escape(chat_identifier)}`\n"
+        f"**Message:** {_md_escape(message.text[:300].strip())}...\n"
 
         f"[Go to message]({message_link})"
     )
