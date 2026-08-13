@@ -94,6 +94,39 @@ class TestSendBotNotification:
             with pytest.raises(RuntimeError, match="Bot API returned 403"):
                 asyncio.run(telegram.send.send_bot_notification("This will fail"))
 
+    def test_parse_error_falls_back_to_plain_text(self):
+        """A 400 'can't parse entities' must retry as plain text (no
+        parse_mode) instead of dropping the alert (regression for the
+        recurring 'can't parse entities' error)."""
+        fake_session = _FakeSessionCtx()
+        responses = {
+            "markdown": (400, '{"ok":false,"description":"Bad Request: '
+                               'can\'t parse entities: Can\'t find end of the '
+                               'entity"}'),
+            "plain": (200, "ok"),
+        }
+
+        original_post = fake_session.post
+
+        def _side_effect(*args, **kwargs):
+            if "parse_mode" in kwargs.get("json", {}):
+                return _FakeResponse(*responses["markdown"])
+            return _FakeResponse(*responses["plain"])
+
+        fake_session.post.side_effect = _side_effect
+
+        with patch("aiohttp.ClientSession", return_value=fake_session):
+            import telegram.send
+            # Should NOT raise: falls back to plain text and succeeds.
+            asyncio.run(telegram.send.send_bot_notification("bad *markdown"))
+
+        # Ensure a plain-text (no parse_mode) call was attempted.
+        plain_calls = [
+            c for c in fake_session.post.call_args_list
+            if "parse_mode" not in c.kwargs.get("json", {})
+        ]
+        assert plain_calls, "expected a plain-text fallback call"
+
 
 # ============================================================================
 # send_alert  (test formatting — mocks send_bot_notification to avoid HTTP)
@@ -133,7 +166,7 @@ class TestSendAlert:
         assert "URGENT: Something" in payload_text
         assert "urgent" in payload_text.lower()
         assert "keyword2" in payload_text.lower()
-        assert "test_channel" in payload_text
+        assert "test\\_channel" in payload_text
 
     def test_alert_shows_first_name_when_no_username(self, message):
         chat = MagicMock()
@@ -166,6 +199,29 @@ class TestSendAlert:
             asyncio.run(telegram.send.send_alert(message, ["test"]))
 
         assert "999888" in mock_notify.call_args[0][0]
+
+    def test_alert_escapes_malformed_markdown_in_message_text(self):
+        """Raw user text with stray/unclosed Markdown chars must be escaped
+        so it can't break the alert message (regression for the recurring
+        'can't parse entities' 400 error)."""
+        msg = MagicMock()
+        msg.id = 777
+        msg.text = "Price *is _broken [today: `see\u00a0"  # unclosed entities
+        chat = MagicMock()
+        chat.username = "chan"
+        chat.id = -100555
+        msg.get_chat = AsyncMock(return_value=chat)
+
+        mock_notify = AsyncMock()
+        with patch("telegram.send.send_bot_notification", mock_notify):
+            import telegram.send
+            asyncio.run(telegram.send.send_alert(msg, ["price"]))
+
+        payload_text = mock_notify.call_args[0][0]
+        assert "\\*is" in payload_text
+        assert "\\_" in payload_text
+        assert "\\[" in payload_text
+        assert "\\`" in payload_text
 
 
 # ============================================================================
