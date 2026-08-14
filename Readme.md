@@ -304,6 +304,48 @@ In the **Firestore Data** view, create the following documents inside a `telegra
 
 Do **not** create `cursor_base` or `matched_messages` — the application creates both automatically on first run.
 
+> **Note on editing chats vs. keywords:** the service reads the `chats` **array**
+> field (the `channels` string field is legacy and ignored). New chats are only
+> auto-registered on the next Cloud Scheduler run. To avoid manual-Firestore
+> mistakes, use the helper script below instead of editing the console directly.
+
+##### Managing chats & keywords (helper script)
+
+A user-friendly CLI manages the `chats` and `word` arrays without touching the
+Firestore console, and it pre-provisions `cursor_base` so a new chat is
+monitored on the very next poll. It also verifies that a chat actually resolves
+to a channel/group (not a private user) and warns about that pitfall.
+
+```bash
+./scripts/manage_config.sh                 # interactive menu
+./scripts/manage_config.sh list
+./scripts/manage_config.sh add-chat "@greenfield9000"
+./scripts/manage_config.sh add-chat "4402366162"     # verify via Telethon
+./scripts/manage_config.sh add-chat "@busy_channel" --from-start   # also scan existing history
+./scripts/manage_config.sh add-keywords "urgent, emergency"
+./scripts/manage_config.sh remove-chat "@old_channel"
+./scripts/manage_config.sh remove-keywords "obsolete"
+./scripts/manage_config.sh reset-chat "@greenfield9000"    # re-scan history from message 0
+./scripts/manage_config.sh reset-chat "4402366162" --cursor 12   # specific cursor
+```
+
+Flags (pass them **before** the subcommand):
+- `--no-verify` — skip the Telegram channel/group check (faster, offline).
+- `--dry-run` — show what would change without writing anything.
+- `--yes` — skip confirmation prompts.
+
+> **Why `reset-chat` / `--from-start`?** When a new chat is first registered,
+> the poller sets its cursor to the **latest** message ID to avoid alerting on
+> old history. Messages that already exist are therefore never keyword-matched.
+> If you added a keyphrase test message (or want to backfill), use
+> `reset-chat @name` (cursor → 0) or add the chat with `--from-start` so the
+> next poll scans from the beginning and alerts on matching historical posts.
+
+The script needs `keys.env` (for `GCP_PROJECT_ID`) and, when verifying chats,
+Telegram secrets (`API_ID`, `API_HASH`, `session_string`). If secrets are not
+available it degrades gracefully to a config-only add and the poller registers
+the chat on its next run.
+
 #### C. Get Telegram API Credentials
 
 1. Go to [my.telegram.org](https://my.telegram.org) and log in with your Telegram account.
@@ -445,6 +487,7 @@ pytest tests/test_starter_conf.py::TestCursorValidation -v
 | `test_listener.py` | 18 | `_should_stop` signal/timeout, `_safe_title` entity extraction, `_save_cursor_sync` persistence, `poll_telegram` early-return & shutdown paths |
 | `test_message_store.py` | 20 | `_strip_nulls`, `_extract_tl_value` type conversion, `_tlobject_to_dict` serialization, `_serialize_message` truncation |
 | `test_send.py` | 8 | Bot API HTTP delivery, keyword alert formatting (username/title/ID fallbacks), health alert emoji selection |
+| `test_manage_config.py` | 20 | Config-manager normalization, chat/keyword add-remove, dedup, chat-to-User rejection, cursor provisioning & reset |
 | `test_starter_conf.py` | 20 | Firestore config loading (keywords/chats/cursors), cursor validation (malformed, negative, large), legacy alert migration |
 
 ### Test Markers
