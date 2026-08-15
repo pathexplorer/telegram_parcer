@@ -23,8 +23,9 @@ from telegram.listener import (
     _should_stop,
     _safe_title,
     _save_cursor_sync,
-)
-# NOTE: poll_telegram is NOT imported at module level — it is imported
+    _chat_sort_key,
+    _get_priority_chat_refs,
+)# NOTE: poll_telegram is NOT imported at module level — it is imported
 # lazily inside each test's ``with patch(...)`` block so that the mocked
 # TelegramClient / StringSession / FirestoreMagic are bound first.
 # The conftest's _clear_main_module_cache fixture removes telegram.listener
@@ -329,3 +330,53 @@ class TestPollTelegramLifecycle:
             call.args == ("1511100059",)
             for call in client.get_entity.call_args_list
         )
+
+
+# ============================================================================
+# Chat polling priority (PRIORITY_CHAT_REFS)
+# ============================================================================
+
+class TestChatPollingPriority:
+    """The poll loop must process priority chats first."""
+
+    def test_get_priority_chat_refs_parses_env(self, monkeypatch):
+        monkeypatch.setenv("PRIORITY_CHAT_REFS", "@GreenField9000, 123456")
+        assert _get_priority_chat_refs() == {"@greenfield9000", "123456"}
+
+    def test_get_priority_chat_refs_empty_by_default(self, monkeypatch):
+        monkeypatch.delenv("PRIORITY_CHAT_REFS", raising=False)
+        assert _get_priority_chat_refs() == set()
+
+    def test_sort_key_matches_by_numeric_id(self):
+        priority = {"4402366162"}
+        items = {
+            "4402366162": {"ref": "@greenfield9000", "last_processed_id": 0,
+                           "alerted_keys": "", "schema_version": 1},
+            "123456789": {"ref": "@other", "last_processed_id": 0,
+                          "alerted_keys": "", "schema_version": 1},
+        }
+        ordered = sorted(items.items(), key=lambda kv: _chat_sort_key(kv, priority))
+        assert ordered[0][0] == "4402366162"  # priority chat first
+        assert ordered[1][0] == "123456789"
+
+    def test_sort_key_matches_by_username_ref(self):
+        priority = {"@greenfield9000"}
+        items = {
+            "4402366162": {"ref": "@greenfield9000", "last_processed_id": 0,
+                           "alerted_keys": "", "schema_version": 1},
+            "100": {"ref": "@aaaa", "last_processed_id": 0,
+                    "alerted_keys": "", "schema_version": 1},
+        }
+        ordered = sorted(items.items(), key=lambda kv: _chat_sort_key(kv, priority))
+        assert ordered[0][0] == "4402366162"  # matched by @ref, first despite larger ID
+
+    def test_sort_key_preserves_numeric_order_within_priority(self):
+        priority = {"@a", "@b"}
+        items = {
+            "500": {"ref": "@b", "last_processed_id": 0,
+                    "alerted_keys": "", "schema_version": 1},
+            "100": {"ref": "@a", "last_processed_id": 0,
+                    "alerted_keys": "", "schema_version": 1},
+        }
+        ordered = sorted(items.items(), key=lambda kv: _chat_sort_key(kv, priority))
+        assert [kv[0] for kv in ordered] == ["100", "500"]

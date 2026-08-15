@@ -16,6 +16,32 @@ from project_env.config import session_string, API_ID, API_HASH
 logger = logging.getLogger(__name__)
 
 
+def _get_priority_chat_refs() -> set[str]:
+    """Read the comma-separated PRIORITY_CHAT_REFS env var (case-insensitive).
+
+    Chats matching these refs (username, e.g. ``@greenfield9000``, or numeric
+    ID) are polled FIRST so e.g. an e2e test chat does not wait behind all
+    other channels.  Returns a lowercased set of refs.
+    """
+    raw = os.getenv("PRIORITY_CHAT_REFS", "")
+    return {r.strip().casefold() for r in raw.split(",") if r.strip()}
+
+
+def _chat_sort_key(item, priority_refs: set[str]) -> tuple:
+    """Sort key: priority chats first (by numeric ID), then the remaining chats.
+
+    The default order is numeric chat ID ascending, which means a newly-added
+    (often large-ID) test chat lands at the end of the queue.  Marking it as
+    priority moves it to the front without changing the rest of the order.
+    """
+    name, values = item
+    ref = ""
+    if isinstance(values, dict):
+        ref = str(values.get("ref", ""))
+    is_priority = name.casefold() in priority_refs or ref.casefold() in priority_refs
+    return (0 if is_priority else 1, int(name))
+
+
 def _should_stop(shutdown_event, deadline):
     """Check if polling should stop due to signal or time limit.
 
@@ -257,9 +283,13 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
             fs.set_firejson(previous_checked_ids, merge=True)
         else:
             logging.debug("No database changes detected.")
-        # 5. Poll messages for each known chat (sorted by numeric ID, smallest first)
+        # 5. Poll messages for each known chat (priority chats first, then by
+        #    numeric ID smallest first — see _chat_sort_key).
         cursors_to_write: dict[str, int] = {}  # track per-chat new cursor values for cross-contam detection
-        for name, values in sorted(previous_checked_ids.items(), key=lambda kv: int(kv[0])):
+        priority_refs = _get_priority_chat_refs()
+        for name, values in sorted(
+            previous_checked_ids.items(), key=lambda kv: _chat_sort_key(kv, priority_refs)
+        ):
             # --- Shutdown check: skip remaining chats if stopping ---
             should_stop, stop_reason = _should_stop(shutdown_event, deadline)
             if should_stop:

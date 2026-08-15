@@ -346,6 +346,35 @@ Telegram secrets (`API_ID`, `API_HASH`, `session_string`). If secrets are not
 available it degrades gracefully to a config-only add and the poller registers
 the chat on its next run.
 
+##### End-to-end smoke test (before/after deploy)
+
+`scripts/e2e_test.sh` verifies the **whole pipeline live**: it posts a keyword
+test message to a chat, forces the deployed poller to run, and waits for the
+alert to arrive in the notification chat (also verifies the Firestore archive).
+
+```bash
+./scripts/e2e_test.sh                          # default chat @greenfield9000
+./scripts/e2e_test.sh --chat @greenfield9000 --trigger function
+./scripts/e2e_test.sh --timeout 240
+./scripts/e2e_test.sh --dry-run                # send the message only, no trigger
+```
+
+Flow: send `This my specialtestphrase E2E<marker>` → `gcloud scheduler jobs run
+telegram-poll-job` (or `gcloud functions call`) → poll the notification chat
+for `KEYWORD ALERT` containing the unique marker → confirm
+`matched_messages/{chat_id}_{msg_id}` in Firestore. Exit code `0` = PASS. The
+test message is deleted afterwards (keep it with `--keep-message`).
+Requires `gcloud` auth (ADC) + `keys.env` (`GCP_PROJECT_ID`, `NOTIFICATION_CHAT`).
+
+> **Speeding it up:** chats are polled by numeric ID (smallest first), so a
+> newly-added test chat lands last (~50 s wait). Deploy with the test chat
+> prioritized and the alert arrives within seconds:
+> ```bash
+> PRIORITY_CHAT_REFS="@greenfield9000" ./deploy.sh
+> ```
+> Set `PRIORITY_CHAT_REFS` (comma-separated usernames/IDs) in `start.yaml` or
+> pass it to `deploy.sh`; priority chats are polled first on every run.
+
 #### C. Get Telegram API Credentials
 
 1. Go to [my.telegram.org](https://my.telegram.org) and log in with your Telegram account.
@@ -484,10 +513,11 @@ pytest tests/test_starter_conf.py::TestCursorValidation -v
 | File | Tests | What's Covered |
 |------|-------|---------------|
 | `test_gcf_deploy.py` | 10 | Full GCF invocation lifecycle, secrets injection, error paths |
-| `test_listener.py` | 19 | `_should_stop` signal/timeout, `_safe_title` entity extraction, `_save_cursor_sync` persistence, `poll_telegram` early-return & shutdown, silent numeric-ref resolution |
+| `test_listener.py` | 24 | `_should_stop` signal/timeout, `_safe_title` entity extraction, `_save_cursor_sync` persistence, `poll_telegram` early-return & shutdown, silent numeric-ref resolution, chat polling priority (`PRIORITY_CHAT_REFS`) |
 | `test_message_store.py` | 20 | `_strip_nulls`, `_extract_tl_value` type conversion, `_tlobject_to_dict` serialization, `_serialize_message` truncation |
 | `test_send.py` | 8 | Bot API HTTP delivery, keyword alert formatting (username/title/ID fallbacks), health alert emoji selection |
 | `test_manage_config.py` | 20 | Config-manager normalization, chat/keyword add-remove, dedup, chat-to-User rejection, cursor provisioning & reset |
+| `test_e2e_test.py` | 11 | E2E smoke-test helpers: keyword guard, archive check, alert detection, int-vs-string chat ID, gcloud trigger construction |
 | `test_starter_conf.py` | 20 | Firestore config loading (keywords/chats/cursors), cursor validation (malformed, negative, large), legacy alert migration |
 
 ### Test Markers

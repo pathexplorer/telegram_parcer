@@ -97,6 +97,9 @@ fi
 if [[ -n "$_ARTIFACT_REPO" ]]; then
     _SUBSTITUTIONS+=",_ARTIFACT_REPO=${_ARTIFACT_REPO}"
 fi
+if [[ -n "${PRIORITY_CHAT_REFS:-}" ]]; then
+    _SUBSTITUTIONS+=",_PRIORITY_CHAT_REFS=${PRIORITY_CHAT_REFS}"
+fi
 
 gcloud builds submit \
     --config start.yaml \
