@@ -270,3 +270,62 @@ class TestPollTelegramLifecycle:
                 known_usernames_to_ids={},
             ))
         assert "TARGET_CHATS_LIST is empty" in caplog.text
+
+    def test_numeric_ref_steady_state_is_silent(self, monkeypatch, caplog):
+        """A private group already tracked by numeric ID must NOT spam logs.
+
+        Regression: ref '1511100059' resolves via the dialog cache without
+        calling get_entity and without the repeated "username not found" /
+        "has no public username" messages.
+        """
+        client = MagicMock()
+        client.start = AsyncMock()
+        client.disconnect = AsyncMock()
+        client.get_input_entity = AsyncMock(return_value=MagicMock())
+
+        dialog = MagicMock()
+        dialog.id = 1511100059
+        dialog.entity = MagicMock()
+        dialog.entity.id = 1511100059
+        dialog.entity.title = "МобілізаціяChat"
+
+        async def _dialogs():
+            yield dialog
+
+        client.iter_dialogs = MagicMock()
+        client.iter_dialogs.return_value = _dialogs()
+
+        msg = MagicMock()
+        msg.id = 99
+        msg.text = "some message"
+        msg.date = MagicMock()
+        client.get_messages = AsyncMock(return_value=[msg])
+
+        fs = MagicMock()
+        fs.load_firejson.return_value = {
+            "1511100059": {"ref": "1511100059", "last_processed_id": 1,
+                           "alerted_keys": "", "schema_version": 1},
+        }
+        fs.backup_document.return_value = None
+        fs.prune_old_backups.return_value = None
+
+        with patch("telegram.listener.TelegramClient"), \
+             patch("telegram.listener.StringSession"), \
+             patch("telegram.listener.FirestoreMagic", return_value=fs), \
+             patch("telegram.listener.send_health_alert", new=AsyncMock()), \
+             patch("telegram.listener.send_bot_notification", new=AsyncMock()):
+            from telegram.listener import poll_telegram
+            asyncio.run(poll_telegram(
+                KEYWORDS_LIST=["urgent"],
+                TARGET_CHATS_LIST=["1511100059"],
+                previous_checked_ids=fs.load_firejson(),
+                known_usernames_to_ids={},
+            ))
+
+        assert "Username '1511100059' not found" not in caplog.text
+        assert "has no public username" not in caplog.text
+        # No network username lookup for a numeric ref.
+        assert not any(
+            call.args == ("1511100059",)
+            for call in client.get_entity.call_args_list
+        )

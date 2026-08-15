@@ -484,7 +484,7 @@ pytest tests/test_starter_conf.py::TestCursorValidation -v
 | File | Tests | What's Covered |
 |------|-------|---------------|
 | `test_gcf_deploy.py` | 10 | Full GCF invocation lifecycle, secrets injection, error paths |
-| `test_listener.py` | 18 | `_should_stop` signal/timeout, `_safe_title` entity extraction, `_save_cursor_sync` persistence, `poll_telegram` early-return & shutdown paths |
+| `test_listener.py` | 19 | `_should_stop` signal/timeout, `_safe_title` entity extraction, `_save_cursor_sync` persistence, `poll_telegram` early-return & shutdown, silent numeric-ref resolution |
 | `test_message_store.py` | 20 | `_strip_nulls`, `_extract_tl_value` type conversion, `_tlobject_to_dict` serialization, `_serialize_message` truncation |
 | `test_send.py` | 8 | Bot API HTTP delivery, keyword alert formatting (username/title/ID fallbacks), health alert emoji selection |
 | `test_manage_config.py` | 20 | Config-manager normalization, chat/keyword add-remove, dedup, chat-to-User rejection, cursor provisioning & reset |

@@ -284,39 +284,32 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
             #    This handles groups that changed their @username or went private.
             #    `msg_peer` is the InputPeer used for API calls (needs access_hash).
             msg_peer = None
-            try:
-                entity = await client.get_entity(value0)
-                # Guard: if the username now resolves to a *different* entity
-                # (e.g. a User that grabbed the old handle after a group went
-                # private), treat as a resolution failure and fall through to
-                # the numeric-ID fallback below.
-                if str(entity.id) != chat_id_str:
+
+            def _resolve_by_numeric_id():
+                """Return the entity for chat_id_str from the dialog cache.
+
+                ``dlg.entity.id`` is the positive public ID (e.g. 1511100059),
+                while ``dialog.id`` is the internal peer ID (-100…).
+                """
+                dlg = _lookup_dialog(chat_id_str)
+                if dlg is None:
                     raise ValueError(
-                        f"Entity ID mismatch for '{value0}': expected {chat_id_str}, "
-                        f"got {entity.id} (type={type(entity).__name__}). "
-                        f"The username may have been reassigned after the chat went private."
+                        f"Chat ID {chat_id_str} not found in dialogs "
+                        f"(account may have lost access or chat was deleted)."
                     )
-                msg_peer = entity  # from network — has access_hash
-            except Exception:
-                logging.warning(
-                    f"Username '{value0}' not found for chat {chat_id_str} "
-                    f"(group may have lost its public username or gone private). "
-                    f"Trying by numeric ID..."
-                )
+                return dlg.entity
+
+            if value0.isdigit():
+                # Steady state for a private group: the stored ref is already a
+                # numeric ID, so a username lookup is impossible. Resolve straight
+                # from the dialog cache without logging the "username lost"
+                # warning over and over — this is the expected condition.
                 try:
-                    dlg = _lookup_dialog(chat_id_str)
-                    if dlg is None:
-                        raise ValueError(
-                            f"Chat ID {chat_id_str} not found in dialogs "
-                            f"(account may have lost access or chat was deleted)."
-                        )
-                    entity = dlg.entity
-                    # Use get_input_entity(entity) — entity.id is the positive public ID
-                    # (e.g. 1511100059), while dialog.id is the internal peer ID (-100…).
+                    entity = _resolve_by_numeric_id()
                     msg_peer = await client.get_input_entity(entity)
                 except Exception as e2:
                     logging.error(
-                        f"Cannot resolve chat {chat_id_str} by numeric ID either: {e2}. Skipping."
+                        f"Cannot resolve chat {chat_id_str} by numeric ID: {e2}. Skipping."
                     )
                     if not _was_alerted(values, "access_lost"):
                         await send_health_alert(
@@ -332,34 +325,76 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                         _mark_alerted(values, "access_lost")
                         db_was_updated = True
                     continue
-                # Update stored reference: new username if available, else use numeric ID
-                new_username = getattr(entity, 'username', None)
-                if new_username:
-                    new_ref = f"@{new_username}"
-                    logging.info(
-                        f"Chat {chat_id_str} renamed from '{value0}' to '{new_ref}'. Updating cursor."
+            else:
+                # Username-based tracking — consult the network.
+                try:
+                    entity = await client.get_entity(value0)
+                    # Guard: if the username now resolves to a *different* entity
+                    # (e.g. a User that grabbed the old handle after a group went
+                    # private), treat as a resolution failure and fall through to
+                    # the numeric-ID fallback below.
+                    if str(entity.id) != chat_id_str:
+                        raise ValueError(
+                            f"Entity ID mismatch for '{value0}': expected {chat_id_str}, "
+                            f"got {entity.id} (type={type(entity).__name__}). "
+                            f"The username may have been reassigned after the chat went private."
+                        )
+                    msg_peer = entity  # from network — has access_hash
+                except Exception:
+                    logging.warning(
+                        f"Username '{value0}' not found for chat {chat_id_str} "
+                        f"(group may have lost its public username or gone private). "
+                        f"Trying by numeric ID..."
                     )
-                    values["ref"] = new_ref
-                else:
-                    logging.info(
-                        f"Chat {chat_id_str} ('{_safe_title(entity)}') has no public username. "
-                        f"Will resolve by numeric ID from now on."
-                    )
-                    values["ref"] = str(chat_id_str)
-                # --- Health alert: username lost, now tracking by numeric ID ---
-                if not _was_alerted(values, "username_lost"):
-                    await send_health_alert(
-                        "Chat username lost",
-                        f"**Chat:** `{_safe_title(entity)}`\n"
-                        f"**Old ref:** `{value0}`\n"
-                        f"**Now tracking by ID:** `{chat_id_str}`\n"
-                        f"The @username no longer resolves. Group may have gone private.",
-                        level="warning",
-                        session=http_session,
-                    )
-                    _mark_alerted(values, "username_lost")
+                    try:
+                        entity = _resolve_by_numeric_id()
+                        msg_peer = await client.get_input_entity(entity)
+                    except Exception as e2:
+                        logging.error(
+                            f"Cannot resolve chat {chat_id_str} by numeric ID either: {e2}. Skipping."
+                        )
+                        if not _was_alerted(values, "access_lost"):
+                            await send_health_alert(
+                                "Lost access to chat",
+                                f"**Chat ID:** `{chat_id_str}`\n"
+                                f"**Last known ref:** `{value0}`\n"
+                                f"**Error:** {e2}\n"
+                                f"Cannot resolve by username or numeric ID. "
+                                f"The account may have lost access or the chat was deleted.",
+                                level="error",
+                                session=http_session,
+                            )
+                            _mark_alerted(values, "access_lost")
+                            db_was_updated = True
+                        continue
+                    # Update stored reference: new username if available, else use numeric ID
+                    new_username = getattr(entity, 'username', None)
+                    if new_username:
+                        new_ref = f"@{new_username}"
+                        logging.info(
+                            f"Chat {chat_id_str} renamed from '{value0}' to '{new_ref}'. Updating cursor."
+                        )
+                        values["ref"] = new_ref
+                    else:
+                        logging.info(
+                            f"Chat {chat_id_str} ('{_safe_title(entity)}') has no public username. "
+                            f"Will resolve by numeric ID from now on."
+                        )
+                        values["ref"] = str(chat_id_str)
+                    # --- Health alert: username lost, now tracking by numeric ID ---
+                    if not _was_alerted(values, "username_lost"):
+                        await send_health_alert(
+                            "Chat username lost",
+                            f"**Chat:** `{_safe_title(entity)}`\n"
+                            f"**Old ref:** `{value0}`\n"
+                            f"**Now tracking by ID:** `{chat_id_str}`\n"
+                            f"The @username no longer resolves. Group may have gone private.",
+                            level="warning",
+                            session=http_session,
+                        )
+                        _mark_alerted(values, "username_lost")
+                        db_was_updated = True
                     db_was_updated = True
-                db_was_updated = True
 
             # C. Get actual messages — fetches only messages newer than the cursor.
             try:
