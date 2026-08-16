@@ -1,0 +1,14 @@
+{
+  "total": 166,
+  "modules": {
+    "test_e2e_test.py": 11,
+    "test_gcf_deploy.py": 14,
+    "test_listener.py": 37,
+    "test_manage_config.py": 20,
+    "test_message_store.py": 28,
+    "test_send.py": 10,
+    "test_starter_conf.py": 19,
+    "test_suite_audit.py": 2,
+    "test_tooling.py": 25
+  }
+}
