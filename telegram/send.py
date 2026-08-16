@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import re
 
 import aiohttp
@@ -16,11 +17,22 @@ _MARKDOWN_ESCAPE = r"\\\1"
 # ── HTTP client defaults ──────────────────────────────────────────────────
 _DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=10)
 _MAX_RETRIES = 3
+# Upper bound on a single 429 Retry-After wait so an aggressive value can't
+# eat the whole poll budget. Anything above this is treated as permanent.
+_MAX_RETRY_AFTER = 60
 
 
 def _is_transient(status: int) -> bool:
     """Return True for status codes that are safe to retry."""
     return status in (429, 500, 502, 503, 504)
+
+
+class _TransientError(RuntimeError):
+    """A retryable Bot API failure (429 / 5xx)."""
+
+
+class _MarkdownParseError(RuntimeError):
+    """The message was rejected because Markdown could not be parsed."""
 
 
 def _md_escape(text: str) -> str:
@@ -66,82 +78,103 @@ async def send_bot_notification(
         try:
             if session is None:
                 async with aiohttp.ClientSession(timeout=_DEFAULT_TIMEOUT) as s:
-                    last_error = await _post_once(s, bot_url, payload)
+                    await _post_once(s, bot_url, payload)
             else:
-                last_error = await _post_once(session, bot_url, payload)
+                await _post_once(session, bot_url, payload)
+            return  # success
+        except _MarkdownParseError:
+            # Recoverable: the same text failed Markdown parsing. Resend once
+            # as plain text, then give up (no point retrying Markdown).
+            logging.warning("⚠️  Message failed Markdown parsing; resending as plain text.")
+            return await _send_plain_text(session, bot_url, payload)
+        except _TransientError as exc:
+            last_error = exc
+            wait_s = getattr(exc, "retry_after", None)
+            if wait_s:
+                logging.warning(
+                    "⏳ 429 Retry-After %d s (attempt %d/%d).", wait_s, attempt, _MAX_RETRIES
+                )
+            else:
+                wait_s = 2 ** attempt + random.uniform(0, 1)
+                logging.warning(
+                    "🌐 Transient Bot API error (attempt %d/%d): %s",
+                    attempt, _MAX_RETRIES, exc,
+                )
+            await asyncio.sleep(wait_s)
         except asyncio.TimeoutError:
             last_error = RuntimeError("Bot API request timed out")
             logging.warning(
                 "⏱️  Bot API timeout (attempt %d/%d).", attempt, _MAX_RETRIES
             )
+            await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
         except aiohttp.ClientError as exc:
             last_error = exc
             logging.warning(
                 "🌐 Bot API network error (attempt %d/%d): %s",
                 attempt, _MAX_RETRIES, exc,
             )
-        except RuntimeError as exc:
-            # Permanent error raised by _post_once. Only a malformed-Markdown
-            # error is recoverable (resend as plain text); anything else raises
-            # immediately exactly as before.
-            if "can't parse entities" not in str(exc):
-                raise
-            last_error = exc
+            await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
+        except RuntimeError:
+            # Permanent error raised by _post_once — do not retry.
+            raise
 
-        if last_error is None:
-            return  # success
+    raise RuntimeError(f"Bot API delivery failed after {_MAX_RETRIES} attempts") from last_error
 
-        # fallthrough above guaranteed a Markdown parse error:
-        logging.warning("⚠️  Message failed Markdown parsing; resending as plain text.")
-        plain_payload = dict(payload)
-        plain_payload.pop("parse_mode", None)
-        try:
-            if session is None:
-                async with aiohttp.ClientSession(timeout=_DEFAULT_TIMEOUT) as s:
-                    last_error = await _post_once(s, bot_url, plain_payload)
-            else:
-                last_error = await _post_once(session, bot_url, plain_payload)
-        except RuntimeError as exc:
-            last_error = exc
-        if last_error is None:
-            return  # plain text delivered successfully
-        raise RuntimeError(f"Bot API delivery failed after {_MAX_RETRIES} attempts") from last_error
+
+async def _send_plain_text(
+    session: aiohttp.ClientSession | None,
+    bot_url: str,
+    payload: dict,
+) -> None:
+    """Resend *payload* without ``parse_mode`` (FR-ALERT-4 fallback)."""
+    plain_payload = dict(payload)
+    plain_payload.pop("parse_mode", None)
+    if session is None:
+        async with aiohttp.ClientSession(timeout=_DEFAULT_TIMEOUT) as s:
+            await _post_once(s, bot_url, plain_payload)
+    else:
+        await _post_once(session, bot_url, plain_payload)
 
 
 async def _post_once(
     session: aiohttp.ClientSession,
     url: str,
     payload: dict,
-) -> Exception | None:
-    """Perform a single HTTP POST.  Returns *None* on success, the exception on failure."""
+) -> None:
+    """Perform a single HTTP POST.  Returns on success; raises on failure."""
     async with session.post(url, json=payload) as resp:
         if resp.status == 200:
             logging.info("✅ Bot notification sent successfully.")
-            return None
+            return
 
         response_text = await resp.text()
         if resp.status == 429:
-            # Respect Retry-After header if present
+            # Respect Retry-After header if present (bounded so an aggressive
+            # value can't consume the poll budget); otherwise let the caller
+            # apply exponential backoff.
             retry_after = resp.headers.get("Retry-After")
+            wait_s = None
             if retry_after is not None:
                 try:
-                    wait_s = int(retry_after)
-                    logging.warning(
-                        "⏳ Telegram 429 — Retry-After %d s. Waiting…", wait_s
-                    )
-                    await asyncio.sleep(wait_s)
+                    wait_s = min(int(retry_after), _MAX_RETRY_AFTER)
                 except ValueError:
-                    pass
+                    wait_s = None
+            error_msg = f"Bot API returned 429: {response_text}"
+            err = _TransientError(error_msg)
+            err.retry_after = wait_s
+            raise err
 
         error_msg = f"Bot API returned {resp.status}: {response_text}"
         if _is_transient(resp.status):
             logging.warning("⚠️  Transient error: %s", error_msg)
-        else:
-            logging.critical("❌ Permanent error: %s", error_msg)
-            # Don't retry permanent errors — raise immediately
-            raise RuntimeError(error_msg)
+            raise _TransientError(error_msg)
+        elif "can't parse entities" in response_text:
+            logging.warning("⚠️  Markdown parse error: %s", error_msg)
+            raise _MarkdownParseError(error_msg)
 
-        return RuntimeError(error_msg)
+        logging.critical("❌ Permanent error: %s", error_msg)
+        # Don't retry permanent errors — raise immediately
+        raise RuntimeError(error_msg)
 
 
 async def send_alert(message, keywords_found, *, session: aiohttp.ClientSession | None = None):

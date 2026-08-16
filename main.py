@@ -1,4 +1,4 @@
-"""Telegram Keyword Monitor — Google Cloud Function (Gen 1) entry point.
+"""Telegram Keyword Monitor — Google Cloud Function (Gen 2) entry point.
 
 Deployed as an HTTP-triggered Cloud Function, invoked by Cloud Scheduler
 with an OIDC token.  Performs incremental polling of public Telegram channels,
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-# Max invocation duration for Gen 1 HTTP Cloud Function is 540 s.
+# Max invocation duration for Gen 2 HTTP Cloud Function is 540 s.
 # We budget 450 s for polling and leave ~90 s for shutdown / cursor flush.
 _DEFAULT_MAX_POLL_SECONDS = 450
 
