@@ -947,11 +947,4 @@ See [Monitoring & Alerting](#monitoring--alerting) for full details on setting u
 
 ### What environment variables does the function use?
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `GCP_PROJECT_ID` | *(required)* | GCP project ID |
-| `TELEGRAM_SECRETS` | `telegram-secrets` | Secret Manager secret name |
-| `MAX_POLL_SECONDS` | `450` | Max poll duration before self-exit |
-| `HEARTBEAT_MAX_AGE_SECONDS` | `7200` | Max heartbeat age for `?health=1` |
-| `LOGGING_LEVEL` | `INFO` | Python log level |
-| `CODE_VERSION` | *(auto)* | Deployed code version tag |
+The full variable registry is the single source in [`config-manifest.md`].
