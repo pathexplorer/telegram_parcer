@@ -16,7 +16,7 @@
 | Code name | `telegram-parcer` |
 | Version | 1.0.0 |
 | Language / runtime | Python 3.12, async (`asyncio`) |
-| Deployment target | Google Cloud Functions (Gen 1, HTTP-triggered) |
+| Deployment target | Google Cloud Functions (Gen 2, HTTP-triggered) |
 | Primary framework | Telethon 1.x (MTProto), Flask (GCF wrapper), aiohttp |
 | Status | Implemented (retrospective spec) |
 
@@ -93,7 +93,7 @@ answer is yes, alert the operator immediately with a link to the original messag
 ## 4. System Context & Architecture
 
 ```
-Cloud Scheduler ──OIDC HTTP──▶ Cloud Function (Gen 1) main(request)
+Cloud Scheduler ──OIDC HTTP──▶ Cloud Function (Gen 2) main(request)
                                         │
               ┌─────────────┬────────────┼─────────────┬─────────────┐
               ▼             ▼            ▼             ▼             ▼
@@ -196,7 +196,8 @@ Requirements use IDs (`FR-x`). Each is satisfied by the current implementation.
 - **FR-ALERT-2** Alert text MUST be Markdown-escaped so untrusted message content
   cannot break formatting or inject commands.
 - **FR-ALERT-3** Bot API delivery MUST retry transient failures (429, 5xx) up to 3
-  attempts and respect `Retry-After` on 429.
+  attempts with exponential backoff and respect `Retry-After` on 429 (capped at
+  60 s so an aggressive value cannot consume the poll budget).
 - **FR-ALERT-4** If Markdown parsing fails, the message MUST be re-sent as plain
   text as a fallback.
 - **FR-ALERT-5** A permanent non-transient Bot API error MUST abort delivery for
@@ -437,7 +438,7 @@ All critical failures return `500` with a descriptive body.
 ## 10. Constraints
 
 - **C-1** Python `==3.12.*` (enforced by `requires-python`).
-- **C-2** GCF Gen 1 timeout 540 s; poll budget default 450 s.
+- **C-2** GCF Gen 2 timeout 540 s; poll budget default 450 s.
 - **C-3** Firestore document limit 1 MiB; archive capped at ~900 KB.
 - **C-4** Telegram message IDs are positive 31-bit ints (cursor bounds check).
 - **C-5** Firestore does not allow nested arrays — hence CSV `alerted_keys`.
@@ -448,7 +449,7 @@ All critical failures return `500` with a descriptive body.
 
 ## 11. Deployment & Operational Constraints
 
-- **11.1** Deployed via Cloud Build (`start.yaml`) to GCF Gen 1, HTTP-triggered,
+- **11.1** Deployed via Cloud Build (`start.yaml`) to GCF Gen 2, HTTP-triggered,
   invoked by Cloud Scheduler every 10 min (active hours 05:00–21:00 UTC) with
   OIDC auth.
 - **11.2** The function MUST NOT be deployed `--allow-unauthenticated`; the
@@ -523,7 +524,7 @@ module-level inventory.
 | FR-ARCH-6 | `TestExtractTlValue`, `TestTLObjectToDict` | test_message_store |
 | FR-ALERT-1 | `TestSendAlert` | test_send |
 | FR-ALERT-2 | `TestSendBotNotification` (escape), `test_marker_has_no_markdown_metacharacters` | test_send / test_e2e_test |
-| FR-ALERT-3 | `TestSendBotNotification` (retries, 429 Retry-After) | test_send |
+| FR-ALERT-3 | `test_retries_transient_then_succeeds`, `test_retries_exhausted_raises`, `test_retry_after_honored` | test_send |
 | FR-ALERT-4 | `TestSendBotNotification` (plain-text fallback) | test_send |
 | FR-ALERT-5 | `TestSendBotNotification` (permanent error, no retry) | test_send |
 | FR-ALERT-6 | `TestSendHealthAlert` | test_send |
@@ -569,7 +570,7 @@ Reference inventory of the offline `pytest` suite. All GCP deps are mocked
 | `test_gcf_deploy.py` | Happy path, config loading, errors, GCF-specific, env detection, `TestWriteHeartbeat` | Deploy invocation lifecycle, secret injection, `?check` / `?health`, failure paths, heartbeat success/failure fields + best-effort. |
 | `test_listener.py` | `TestShouldStop`, `TestSafeTitle`, `TestSaveCursorSync`, `TestPollTelegramLifecycle`, `TestChatPollingPriority`, `TestMatching`, `TestCursorGuards`, `TestCrossContaminationDetection`, `TestBackupBeforeSave`, `TestAlertFailureCursorStall` | Signal/timeout, title extraction, cursor persistence, poll lifecycle, priority ordering, keyword matching (substring/NFKC/case), cursor guards, cross-contamination abort, backup/prune, alert-failure cursor stall. |
 | `test_message_store.py` | `TestStripNulls`, `TestExtractTlValue`, `TestTLObjectToDict`, `TestEstimateSize`, `TestSerializeMessage` | Serialization, type conversion, truncation, size bounds. |
-| `test_send.py` | `TestSendBotNotification`, `TestSendAlert`, `TestSendHealthAlert` | Bot API delivery, retries, Markdown escape/fallback, alert formatting. |
+| `test_send.py` | `TestSendBotNotification` (delivery, transient retry + backoff, 429 Retry-After, Markdown escape/plain-text fallback, permanent-error no-retry), `TestSendAlert`, `TestSendHealthAlert` | Bot API delivery, retries, Markdown escape/fallback, alert formatting. |
 | `test_manage_config.py` | (20 flat tests) | Config normalization, chat/keyword add/remove, dedup, User rejection, cursor provisioning/reset, dry-run. |
 | `test_e2e_test.py` | (11 flat tests) | E2E helpers: keyword guard, archive check, alert detection, int/string chat IDs, gcloud trigger construction. |
 | `test_starter_conf.py` | Happy path, errors, cursor validation, legacy migration, known-usernames | Firestore config load, cursor validation, migration. |
@@ -593,6 +594,7 @@ here.
 | *(initial)* | v1.0.0 retrospective baseline | Document created from current implemented state. | — |
 | 2026-08-16 | §14, §16.2 | Gap-closure batch: added offline tests for cursor guards, cross-contamination, backup/prune, heartbeat best-effort, alert-failure cursor stall, substring matching, reset_cursors helpers + `bash -n` shell lint, and a test-count audit (manifest `tests/expected_test_counts.json` + `tests/test_suite_audit.py`). Suite grew 122 → 166 tests; README counts corrected. | — |
 | 2026-08-16 | FR-POLL-6 | **Bug fix**: registration check for an already-known numeric chat indexed the typed cursor dict with `[0]` (legacy-list style) → `KeyError: 0` → spurious "Chat resolution failed" CRITICAL + alert every cycle for numeric-ID chats. Now keyed by `"ref"` (implementation fix only; intended behaviour unchanged). | — |
+| 2026-08-16 | FR-ALERT-3, §2, §10, §11 | **Bug fix (retry loop) + Gen 2 correction.** The Bot API retry loop never retried: `_post_once` *returned* a `RuntimeError` for transient 5xx instead of raising, so the loop collapsed to a single Markdown attempt + one plain-text fallback, with no backoff. Rewrote `send.py` to raise typed errors (`_TransientError`, `_MarkdownParseError`) and retry transient failures with exponential backoff + jitter; 429 `Retry-After` honored but capped at 60 s. Added tests `test_retries_transient_then_succeeds`, `test_retries_exhausted_raises`, `test_retry_after_honored` (FR-ALERT-3 now genuinely covered; RTM cell updated). Also corrected the deployment target from Gen 1 to **Gen 2** across README/TRD/`start.yaml` (`--gen2` flag added) so the Monitoring alert filter (`cloud_run_revision`) matches the actual runtime. Suite 166 → 169 tests. | — |
 
 ### 16.1 Change policy
 

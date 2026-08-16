@@ -33,7 +33,12 @@ class _FakeSessionCtx:
         self.post.side_effect = self._make_response
 
     def _make_response(self, *args, **kwargs):
-        return _FakeResponse(self._resp_status, self._resp_text)
+        status = self._resp_status
+        text = self._resp_text
+        headers = {}
+        if isinstance(status, (list, tuple)):
+            status, headers = status
+        return _FakeResponse(status, text, headers)
 
     async def __aenter__(self):
         return self
@@ -45,9 +50,10 @@ class _FakeSessionCtx:
 class _FakeResponse:
     """Async context manager for aiohttp.ClientResponse."""
 
-    def __init__(self, status=200, text="ok"):
+    def __init__(self, status=200, text="ok", headers=None):
         self.status = status
         self._text = text
+        self.headers = headers or {}
 
     async def __aenter__(self):
         return self
@@ -126,6 +132,63 @@ class TestSendBotNotification:
             if "parse_mode" not in c.kwargs.get("json", {})
         ]
         assert plain_calls, "expected a plain-text fallback call"
+
+    def test_retries_transient_then_succeeds(self):
+        """A transient 500 followed by 200 must retry and succeed."""
+        fake_session = _FakeSessionCtx()
+        responses = [(500, '{"ok":false}'), (200, "ok")]
+        call_count = 0
+
+        def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            status = responses[min(call_count, len(responses) - 1)]
+            call_count += 1
+            return _FakeResponse(*status)
+
+        fake_session.post.side_effect = _side_effect
+
+        with patch("telegram.send.asyncio.sleep", AsyncMock()), \
+             patch("aiohttp.ClientSession", return_value=fake_session):
+            import telegram.send
+            asyncio.run(telegram.send.send_bot_notification("retry me"))
+
+        assert call_count == 2
+
+    def test_retries_exhausted_raises(self):
+        """Persistent transient 500s must raise after _MAX_RETRIES attempts."""
+        fake_session = _FakeSessionCtx()
+        fake_session._resp_status = 500
+        fake_session._resp_text = '{"ok":false}'
+
+        with patch("telegram.send.asyncio.sleep", AsyncMock()), \
+             patch("aiohttp.ClientSession", return_value=fake_session):
+            import telegram.send
+            with pytest.raises(RuntimeError, match="delivery failed"):
+                asyncio.run(telegram.send.send_bot_notification("always fails"))
+
+        assert fake_session.post.call_count == telegram.send._MAX_RETRIES
+
+    def test_retry_after_honored(self):
+        """A 429 with Retry-After must wait that long before retrying."""
+        fake_session = _FakeSessionCtx()
+        responses = [(429, '{"ok":false}', {"Retry-After": "7"}), (200, "ok", {})]
+        call_count = 0
+
+        def _side_effect(*args, **kwargs):
+            nonlocal call_count
+            status, text, headers = responses[min(call_count, len(responses) - 1)]
+            call_count += 1
+            return _FakeResponse(status, text, headers)
+
+        fake_session.post.side_effect = _side_effect
+
+        with patch("telegram.send.asyncio.sleep", AsyncMock()) as mock_sleep, \
+             patch("aiohttp.ClientSession", return_value=fake_session):
+            import telegram.send
+            asyncio.run(telegram.send.send_bot_notification("rate limited"))
+
+        assert call_count == 2
+        mock_sleep.assert_called_once_with(7)
 
 
 # ============================================================================
