@@ -25,6 +25,7 @@ from telegram.listener import (
     _save_cursor_sync,
     _chat_sort_key,
     _get_priority_chat_refs,
+    _find_matching_keywords,
 )# NOTE: poll_telegram is NOT imported at module level — it is imported
 # lazily inside each test's ``with patch(...)`` block so that the mocked
 # TelegramClient / StringSession / FirestoreMagic are bound first.
@@ -277,12 +278,13 @@ class TestPollTelegramLifecycle:
 
         Regression: ref '1511100059' resolves via the dialog cache without
         calling get_entity and without the repeated "username not found" /
-        "has no public username" messages.
+        "has no public username" messages. Also: the typed-dict cursor must
+        not crash the registration check (regression: KeyError on [0]).
         """
         client = MagicMock()
         client.start = AsyncMock()
         client.disconnect = AsyncMock()
-        client.get_input_entity = AsyncMock(return_value=MagicMock())
+        client.get_input_entity = AsyncMock(side_effect=lambda entity: entity)
 
         dialog = MagicMock()
         dialog.id = 1511100059
@@ -310,11 +312,22 @@ class TestPollTelegramLifecycle:
         fs.backup_document.return_value = None
         fs.prune_old_backups.return_value = None
 
-        with patch("telegram.listener.TelegramClient"), \
+        class _ClientCtx:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return client
+
+            async def __aexit__(self, *args):
+                return None
+
+        with patch("telegram.listener.TelegramClient", _ClientCtx), \
              patch("telegram.listener.StringSession"), \
              patch("telegram.listener.FirestoreMagic", return_value=fs), \
              patch("telegram.listener.send_health_alert", new=AsyncMock()), \
-             patch("telegram.listener.send_bot_notification", new=AsyncMock()):
+             patch("telegram.listener.send_bot_notification", new=AsyncMock()), \
+             patch("telegram.listener.asyncio.sleep", new=AsyncMock()):
             from telegram.listener import poll_telegram
             asyncio.run(poll_telegram(
                 KEYWORDS_LIST=["urgent"],
@@ -325,11 +338,17 @@ class TestPollTelegramLifecycle:
 
         assert "Username '1511100059' not found" not in caplog.text
         assert "has no public username" not in caplog.text
+        assert "Could not resolve or process" not in caplog.text
+        assert "Chat resolution failed" not in caplog.text
         # No network username lookup for a numeric ref.
         assert not any(
             call.args == ("1511100059",)
             for call in client.get_entity.call_args_list
         )
+        # The poller really polled the chat via the dialog cache.
+        client.get_input_entity.assert_awaited()
+        # Cursor advanced past the fetched message (99) and was saved.
+        assert fs.set_firejson.call_args.args[0]["1511100059"]["last_processed_id"] == 99
 
 
 # ============================================================================
@@ -380,3 +399,279 @@ class TestChatPollingPriority:
         }
         ordered = sorted(items.items(), key=lambda kv: _chat_sort_key(kv, priority))
         assert [kv[0] for kv in ordered] == ["100", "500"]
+
+
+# ============================================================================
+# Helpers for poll_telegram tests
+# ============================================================================
+
+def _make_cursor(chat_id, last_processed_id, ref=None):
+    """Build a typed cursor entry for a chat."""
+    return {
+        "ref": ref or str(chat_id),
+        "last_processed_id": last_processed_id,
+        "alerted_keys": "",
+        "schema_version": 1,
+    }
+
+
+def _make_msg(msg_id, text):
+    """Build a mock Telethon message with an id and text."""
+    from datetime import datetime, timezone
+
+    msg = MagicMock()
+    msg.id = msg_id
+    msg.text = text
+    msg.date = datetime.now(timezone.utc)
+    return msg
+
+
+def _make_dialog(chat_id, title):
+    """Build a mock Telethon Dialog resolvable by *chat_id*."""
+    dialog = MagicMock()
+    dialog.id = chat_id
+    dialog.entity = MagicMock()
+    dialog.entity.id = chat_id
+    dialog.entity.title = title
+    return dialog
+
+
+def _poll_with_mocks(cursor_base, dialogs, messages_by_chat, *,
+                     send_alert_side_effect=None, keywords=("urgent",),
+                     fs=None):
+    """Run poll_telegram against fully mocked Telethon/Firestore deps.
+
+    Returns the (fs, client, send_alert, send_bot_notification,
+    send_health_alert) mocks so tests can assert on cursor writes and
+    alert/notification traffic.
+
+    NOTE: ``MagicMock.__aenter__`` yields a *child* mock, not the mock
+    itself — a bare ``patch("telegram.listener.TelegramClient")`` would
+    hand poll_telegram an unconfigured client.  A dedicated context class
+    (same approach as conftest's ``mock_all_gcp_deps``) makes the client
+    reachable.
+    """
+    fs = fs or MagicMock()
+    fs.load_firejson.return_value = dict(cursor_base)
+    fs.backup_document.return_value = None
+    fs.prune_old_backups.return_value = None
+
+    client = MagicMock()
+    client.start = AsyncMock()
+    client.disconnect = AsyncMock()
+    client.get_input_entity = AsyncMock(side_effect=lambda entity: entity)
+
+    async def _dialogs():
+        for dialog in dialogs:
+            yield dialog
+
+    client.iter_dialogs = MagicMock()
+    client.iter_dialogs.return_value = _dialogs()
+
+    def _get_messages(entity, **kwargs):
+        return messages_by_chat.get(str(getattr(entity, "id", "")), [])
+
+    client.get_messages = AsyncMock(side_effect=_get_messages)
+
+    class _ClientCtx:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, *args):
+            return None
+
+    send_alert = AsyncMock(side_effect=send_alert_side_effect)
+    archive = AsyncMock()
+    notif = AsyncMock()
+    health = AsyncMock()
+
+    with patch("telegram.listener.TelegramClient", _ClientCtx), \
+         patch("telegram.listener.StringSession"), \
+         patch("telegram.listener.FirestoreMagic", return_value=fs), \
+         patch("telegram.listener.send_alert", new=send_alert), \
+         patch("telegram.listener.send_bot_notification", new=notif), \
+         patch("telegram.listener.send_health_alert", new=health), \
+         patch("telegram.listener.save_matched_message_to_firestore", new=archive), \
+         patch("telegram.listener.asyncio.sleep", new=AsyncMock()):
+        from telegram.listener import poll_telegram
+        asyncio.run(poll_telegram(
+            KEYWORDS_LIST=list(keywords),
+            TARGET_CHATS_LIST=list(cursor_base),
+            previous_checked_ids=dict(cursor_base),
+            known_usernames_to_ids={},
+        ))
+    return fs, client, send_alert, notif, health
+
+
+# ============================================================================
+# _find_matching_keywords — FR-MATCH-3 (substring, case, NFKC)
+# ============================================================================
+
+class TestMatching:
+    """Keyword matching: substring semantics, case-insensitivity, NFKC."""
+
+    def test_substring_match_within_longer_word(self):
+        """Keywords match anywhere in the text — no word boundaries."""
+        assert _find_matching_keywords("concatenation error", ["cat"]) == ["cat"]
+
+    def test_case_insensitive(self):
+        assert _find_matching_keywords("This is URGENT now", ["urgent"]) == ["urgent"]
+
+    def test_nfkc_fullwidth_normalized(self):
+        """Fullwidth Latin (ＵＲＧＥＮＴ) matches the ASCII keyword."""
+        assert _find_matching_keywords("警告：ＵＲＧＥＮＴ", ["urgent"]) == ["urgent"]
+
+    def test_nfkc_decomposed_vs_composed(self):
+        """Decomposed 'cafe\\u0301' matches composed keyword 'café'."""
+        assert _find_matching_keywords("cafe\u0301 ouvert", ["café"]) == ["café"]
+
+    def test_no_match_returns_empty(self):
+        assert _find_matching_keywords("nothing relevant here", ["urgent", "alert"]) == []
+
+    def test_returns_only_matching_keywords_in_keyword_order(self):
+        assert _find_matching_keywords(
+            "alert and urgent", ["zzz", "urgent", "alert"]
+        ) == ["urgent", "alert"]
+
+    def test_empty_text_never_matches(self):
+        assert _find_matching_keywords("", ["urgent"]) == []
+
+
+# ============================================================================
+# Cursor sanity guards — FR-STATE-5
+# ============================================================================
+
+class TestCursorGuards:
+    """Guard behaviour: refuse invalid cursor advancement."""
+
+    def test_computed_above_newest_keeps_cursor(self, caplog):
+        """Computed cursor > newest message → keep old cursor + notify.
+
+        Simulated via an out-of-order batch: the newest message (id 100)
+        fails its alert, leaving last acked at id 200 > newest 100.
+        """
+        cursor_base = {"111": _make_cursor(111, 42)}
+
+        def _flaky_alert(message, *args, **kwargs):
+            if message.id == 100:
+                raise RuntimeError("bot api down")
+            return None
+
+        fs, client, send_alert, notif, health = _poll_with_mocks(
+            cursor_base,
+            [_make_dialog(111, "Test Chat")],
+            {"111": [_make_msg(100, "urgent"), _make_msg(200, "urgent")]},
+            send_alert_side_effect=_flaky_alert,
+        )
+        assert "CURSOR GUARD" in caplog.text
+        assert "Refusing to advance" in caplog.text
+        notif.assert_awaited_once()
+        assert "CURSOR GUARD TRIGGERED" in notif.await_args.args[0]
+        saved = fs.set_firejson.call_args.args[0]["111"]["last_processed_id"]
+        assert saved == 42  # old cursor preserved
+
+    def test_computed_below_current_keeps_cursor(self, caplog):
+        """Computed cursor < current cursor (cross-contamination hint) → keep old."""
+        cursor_base = {"111": _make_cursor(111, 42)}
+        # Mock bypasses min_id: the fetched message predates the cursor.
+        fs, client, send_alert, notif, health = _poll_with_mocks(
+            cursor_base,
+            [_make_dialog(111, "Test Chat")],
+            {"111": [_make_msg(5, "no keywords here")]},
+        )
+        assert "CURSOR GUARD" in caplog.text
+        assert "LESS than current cursor" in caplog.text
+        saved = fs.set_firejson.call_args.args[0]["111"]["last_processed_id"]
+        assert saved == 42  # old cursor preserved
+
+
+# ============================================================================
+# Cross-contamination detection — FR-STATE-6
+# ============================================================================
+
+class TestCrossContaminationDetection:
+    """Multiple chats must never receive the same new cursor value."""
+
+    def test_duplicate_cursor_values_abort_final_save(self, caplog):
+        """Two chats acked to the same value → CRITICAL + final save aborted."""
+        cursor_base = {
+            "111": _make_cursor(111, 42),
+            "222": _make_cursor(222, 42),
+        }
+        # Anomaly: both chats produce a message with the same id.
+        fs, client, send_alert, notif, health = _poll_with_mocks(
+            cursor_base,
+            [_make_dialog(111, "Chat One"), _make_dialog(222, "Chat Two")],
+            {"111": [_make_msg(50, "urgent")], "222": [_make_msg(50, "urgent")]},
+        )
+        assert "CROSS-CONTAMINATION DETECTED" in caplog.text
+        assert "Aborting save" in caplog.text
+        notif.assert_awaited_once()
+        assert "CROSS-CONTAMINATION DETECTED" in notif.await_args.args[0]
+        # Only the two per-chat incremental saves happened; the final
+        # merged save (and its backup) was aborted.
+        assert fs.set_firejson.call_count == 2
+        fs.backup_document.assert_not_called()
+
+
+# ============================================================================
+# Backup before save — FR-STATE-7
+# ============================================================================
+
+class TestBackupBeforeSave:
+    """cursor_base is backed up (with pruning) before every write."""
+
+    def test_backup_and_prune_called_before_save(self):
+        cursor_base = {"111": _make_cursor(111, 42)}
+        fs, client, send_alert, notif, health = _poll_with_mocks(
+            cursor_base,
+            [_make_dialog(111, "Test Chat")],
+            {"111": [_make_msg(50, "urgent")]},
+        )
+        fs.backup_document.assert_called_once()
+        fs.prune_old_backups.assert_called_once_with(max_backups=30)
+        saved = fs.set_firejson.call_args.args[0]["111"]["last_processed_id"]
+        assert saved == 50  # normal advance still written
+
+    def test_backup_failure_is_non_fatal(self, caplog):
+        """A failing backup must not block the cursor save."""
+        cursor_base = {"111": _make_cursor(111, 42)}
+        fs = MagicMock()
+        fs.backup_document.side_effect = RuntimeError("backup exploded")
+        fs, client, send_alert, notif, health = _poll_with_mocks(
+            cursor_base,
+            [_make_dialog(111, "Test Chat")],
+            {"111": [_make_msg(50, "urgent")]},
+            fs=fs,
+        )
+        assert "Backup failed (non-fatal)" in caplog.text
+        fs.set_firejson.assert_called()  # save proceeded despite backup failure
+        saved = fs.set_firejson.call_args.args[0]["111"]["last_processed_id"]
+        assert saved == 50
+
+
+# ============================================================================
+# Alert-failure cursor stall — FR-STATE-2 (isolated)
+# ============================================================================
+
+class TestAlertFailureCursorStall:
+    """A failed alert must stall the cursor and stop processing the batch."""
+
+    def test_alert_failure_keeps_cursor_and_breaks_batch(self, caplog):
+        cursor_base = {"111": _make_cursor(111, 42)}
+        fs, client, send_alert, notif, health = _poll_with_mocks(
+            cursor_base,
+            [_make_dialog(111, "Test Chat")],
+            {"111": [_make_msg(51, "urgent"), _make_msg(50, "urgent")]},
+            send_alert_side_effect=RuntimeError("bot api down"),
+        )
+        # Only the first message (id 50) was attempted — the loop broke
+        # instead of advancing past the failed alert.
+        send_alert.assert_awaited_once()
+        assert send_alert.await_args.args[0].id == 50
+        assert "will retry on next run" in caplog.text
+        saved = fs.set_firejson.call_args.args[0]["111"]["last_processed_id"]
+        assert saved == 42  # cursor NOT advanced past the failed message

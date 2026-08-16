@@ -68,6 +68,26 @@ def _save_cursor_sync(fs, previous_checked_ids):
         logger.error("❌ Failed to save cursor to Firestore: %s", e)
 
 
+def _find_matching_keywords(text: str, keywords: list[str]) -> list[str]:
+    """Return the subset of *keywords* present in *text* (substring match).
+
+    Matching is case-insensitive and Unicode-aware: both sides are
+    NFKC-normalized and casefolded so fullwidth Latin, composed/decomposed
+    forms and case variants all match (e.g. "café" matches "CAFÉ" and
+    "cafe\u0301"). Substring semantics — a keyword matches when it appears
+    anywhere in the text, with no word-boundary or regex logic.
+
+    Args:
+        text: Raw message text (may be empty/None).
+        keywords: Normalized keyword list (see starter_conf).
+
+    Returns:
+        The keywords found in *text*, in the order they appear in *keywords*.
+    """
+    normalized_text = unicodedata.normalize("NFKC", text).casefold()
+    return [kw for kw in keywords if kw in normalized_text]
+
+
 def _safe_title(entity):
     """Return a human-readable title for any Telethon entity type.
 
@@ -196,12 +216,12 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 if is_numeric_ref and chat_ref in previous_checked_ids:
                     # Numeric ID already known — no network call needed.
                     # Update the stored reference to use numeric ID (in case it was an old @username).
-                    old_ref = previous_checked_ids[chat_ref][0]
+                    old_ref = previous_checked_ids[chat_ref]["ref"]
                     if old_ref != chat_ref:
                         logger.warning(
                             "Chat %s: reference updated from '%s' to numeric ID '%s'.",
                             chat_ref, old_ref, chat_ref)
-                        previous_checked_ids[chat_ref][0] = chat_ref
+                        previous_checked_ids[chat_ref]["ref"] = chat_ref
                         db_was_updated = True
                     else:
                         logger.debug("Chat '%s' already in database. Skipping.", chat_ref)
@@ -463,11 +483,7 @@ async def poll_telegram(KEYWORDS_LIST, TARGET_CHATS_LIST, previous_checked_ids, 
                 message_text = message.text
 
                 if message_text:
-                    # NFKC + casefold for locale-independent Unicode-aware matching.
-                    # Handles fullwidth Latin, composed/decomposed forms, and
-                    # case variants (e.g. "café" matches "CAFÉ" and "cafe\u0301").
-                    normalized_text = unicodedata.normalize("NFKC", message_text).casefold()
-                    found_keywords = [kw for kw in KEYWORDS_LIST if kw in normalized_text]
+                    found_keywords = _find_matching_keywords(message_text, KEYWORDS_LIST)
 
                     logging.debug(f"Message ID {message.id}: {repr(message_text[:50])}...")
                     logging.debug(f"Matched keywords: {found_keywords}")

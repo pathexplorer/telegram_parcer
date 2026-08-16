@@ -1,6 +1,10 @@
 # Telegram Parser
 ![telegram_parcer](cover.webp)
 
+> **Formal specification:** see [docs/TECHNICAL_REQUIREMENTS.md](docs/TECHNICAL_REQUIREMENTS.md)
+> for the formal requirements (FR/NFR), data model, failure modes and traceability matrix.
+> This README covers setup, operation and troubleshooting.
+
 ## Overview
 
 This project is a high-performance Telegram monitoring tool designed to listen to specified public channels, search for defined keywords in real-time, and send alerts when matches are found. It utilizes the [Telethon](https://docs.telethon.dev/en/stable/) library for interacting with the Telegram API.
@@ -75,7 +79,7 @@ that does one job well. This makes it naturally composable in larger pipelines:
 
 - **Language**: Python 3.12
 - **Core Library**: `Telethon` (Async Telegram client)
-- **Testing**: `pytest` (81 tests across 5 test modules) with coverage tracking
+- **Testing**: `pytest` (166 tests across 9 test modules) with coverage tracking
 - **Infrastructure**:
   - **Google Cloud Firestore**: Stores configuration (`keywords`, `chats`) and state (`cursor_base`).
   - **Google Secret Manager**: Securely stores API credentials.
@@ -482,7 +486,7 @@ You should see log output showing that the bot is scanning channels for keywords
 
 ## Testing
 
-The project includes a comprehensive test suite (**81 tests**) built with `pytest`.
+The project includes a comprehensive test suite (**166 tests**) built with `pytest`.
 All GCP dependencies (Secret Manager, Firestore, Telethon, Cloud Logging) are mocked
 so tests run **offline** — no credentials or network access required.
 
@@ -512,13 +516,20 @@ pytest tests/test_starter_conf.py::TestCursorValidation -v
 
 | File | Tests | What's Covered |
 |------|-------|---------------|
-| `test_gcf_deploy.py` | 10 | Full GCF invocation lifecycle, secrets injection, error paths |
-| `test_listener.py` | 24 | `_should_stop` signal/timeout, `_safe_title` entity extraction, `_save_cursor_sync` persistence, `poll_telegram` early-return & shutdown, silent numeric-ref resolution, chat polling priority (`PRIORITY_CHAT_REFS`) |
-| `test_message_store.py` | 20 | `_strip_nulls`, `_extract_tl_value` type conversion, `_tlobject_to_dict` serialization, `_serialize_message` truncation |
-| `test_send.py` | 8 | Bot API HTTP delivery, keyword alert formatting (username/title/ID fallbacks), health alert emoji selection |
+| `test_gcf_deploy.py` | 14 | Full GCF invocation lifecycle, secrets injection, error paths, heartbeat write/read (success, failure, best-effort) |
+| `test_listener.py` | 37 | `_should_stop` signal/timeout, `_safe_title` entity extraction, `_save_cursor_sync` persistence, `poll_telegram` lifecycle (early-return, shutdown, silent numeric-ref resolution), chat polling priority, keyword matching (substring/NFKC/case), cursor guards, cross-contamination abort, backup/prune, alert-failure cursor stall |
+| `test_message_store.py` | 28 | `_strip_nulls`, `_extract_tl_value` type conversion, `_tlobject_to_dict` serialization, `_serialize_message` truncation |
+| `test_send.py` | 10 | Bot API HTTP delivery, keyword alert formatting (username/title/ID fallbacks), health alert emoji selection |
 | `test_manage_config.py` | 20 | Config-manager normalization, chat/keyword add-remove, dedup, chat-to-User rejection, cursor provisioning & reset |
 | `test_e2e_test.py` | 11 | E2E smoke-test helpers: keyword guard, archive check, alert detection, int-vs-string chat ID, gcloud trigger construction |
-| `test_starter_conf.py` | 20 | Firestore config loading (keywords/chats/cursors), cursor validation (malformed, negative, large), legacy alert migration |
+| `test_starter_conf.py` | 19 | Firestore config loading (keywords/chats/cursors), cursor validation (malformed, negative, large), legacy alert migration |
+| `test_tooling.py` | 25 | `emergency/reset_cursors.py` helpers (gap formatting, cursor/ref extraction, dialog lookup, latest-message fetch), `bash -n` lint + shebang check for `run_local.sh`, `deploy.sh`, `scripts/*.sh` |
+| `test_suite_audit.py` | 2 | Test-count audit: the collected suite (total + per-module) must match `tests/expected_test_counts.json` |
+
+> **Test-count audit**: `tests/test_suite_audit.py` re-runs `pytest --collect-only`
+> and verifies the suite size against `tests/expected_test_counts.json`. When
+> adding/removing tests, update that manifest (or run the audit test to see the
+> expected values).
 
 ### Test Markers
 

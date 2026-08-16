@@ -281,3 +281,77 @@ class TestEnvironmentDetection:
             # In local mode it returns DEFAULT_APP_ID = 'local-dev-mode'
             assert "local" in result.lower()
             assert result == "local-dev-mode"
+
+
+# ===================================================================
+# Heartbeat — FR-MON-1/2/3
+# ===================================================================
+
+@pytest.mark.usefixtures("mock_all_gcp_deps")
+class TestWriteHeartbeat:
+    """Heartbeat writes: success/failure fields + best-effort guarantees.
+
+    The heartbeat is the independent "dead man's switch" — it must record
+    both poll outcomes and MUST never crash the function when Firestore is
+    unavailable (FR-MON-3).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mock_firestore_for_heartbeat(self, mock_all_gcp_deps):
+        """Give _write_heartbeat a dedicated, inspectable Firestore mock.
+
+        Depends on mock_all_gcp_deps so it nests INSIDE that patch scope;
+        otherwise the fixture's patch would be overwritten by the conftest
+        mock and _write_heartbeat would record writes on the wrong mock.
+        """
+        fs = MagicMock()
+        with patch(
+            "gcp_actions.firestore_box.json_manipulations.FirestoreMagic",
+            return_value=fs,
+        ):
+            yield fs
+
+    def test_success_heartbeat_writes_success_fields(self, _mock_firestore_for_heartbeat):
+        from telegram_parcer.main import _write_heartbeat
+
+        _write_heartbeat(True)
+        payload = _mock_firestore_for_heartbeat.set_firejson.call_args.args[0]
+        assert "last_success_ts" in payload
+        assert "last_success_date" in payload
+        assert payload["last_success_date"].endswith("+00:00")  # UTC ISO
+        assert "code_version" in payload
+        assert "function_name" in payload
+        assert "last_failure_ts" not in payload
+        _mock_firestore_for_heartbeat.set_firejson.assert_called_once_with(
+            payload, merge=True
+        )
+
+    def test_failure_heartbeat_writes_failure_fields(self, _mock_firestore_for_heartbeat):
+        from telegram_parcer.main import _write_heartbeat
+
+        _write_heartbeat(False, detail="secret injection: boom")
+        payload = _mock_firestore_for_heartbeat.set_firejson.call_args.args[0]
+        assert "last_failure_ts" in payload
+        assert "last_failure_date" in payload
+        assert payload["last_failure_detail"] == "secret injection: boom"
+        assert "last_success_ts" not in payload
+
+    def test_firestore_failure_is_best_effort(self, _mock_firestore_for_heartbeat, caplog):
+        """FR-MON-3: a failing Firestore write must NOT raise."""
+        from telegram_parcer.main import _write_heartbeat
+
+        _mock_firestore_for_heartbeat.set_firejson.side_effect = RuntimeError(
+            "Firestore down"
+        )
+        _write_heartbeat(True)  # must not raise
+        assert "Failed to write heartbeat to Firestore" in caplog.text
+
+    def test_heartbeat_read_failure_returns_none(self, _mock_firestore_for_heartbeat, caplog):
+        """Unreachable Firestore → _read_heartbeat returns None, no exception."""
+        from telegram_parcer.main import _read_heartbeat
+
+        _mock_firestore_for_heartbeat.load_firejson.side_effect = RuntimeError(
+            "Firestore down"
+        )
+        assert _read_heartbeat() is None
+        assert "Could not read heartbeat" in caplog.text
