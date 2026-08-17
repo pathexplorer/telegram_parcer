@@ -815,10 +815,9 @@ telegram_parcer/
 │   └── config.py            # Reads secrets from os.environ
 ├── emergency/               # Operational tools
 │   └── reset_cursors.py     # Emergency cursor-reset utility
-├── test/                    # Diagnostic / manual test scripts
-│   └── diagnose_chat.py     # Chat accessibility diagnostic tool
-└── tests/                   # Automated test suite (pytest)
+└── tests/                   # Automated test suite (pytest) + diagnostic tools
     ├── conftest.py          # Shared fixtures — mocks for GCP, Firestore, Telethon
+    ├── diagnose_chat.py     # Chat accessibility diagnostic tool
     ├── test_gcf_deploy.py   # GCF deployment simulation (end-to-end)
     ├── test_listener.py     # Polling loop, cursor management, shutdown logic
     ├── test_message_store.py # Message serialization, truncation, TL object handling

@@ -60,7 +60,7 @@ markers = [
 [tool.coverage.run]
 source = ["telegram_parcer", "telegram", "emergency", "project_env"]
 branch = true
-omit = ["tests/*", "test/*"]
+omit = ["tests/*"]
 
 [tool.coverage.report]
 exclude_also = [

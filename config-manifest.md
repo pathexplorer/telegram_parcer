@@ -38,7 +38,7 @@ Hard = required, Opt = optional (default), Ref = legacy/read-only alias.
 | `HEARTBEAT_MAX_AGE_SECONDS` | 3 | Opt | `7200` | `main.py` `?health=1` | Max heartbeat age; set > 2× scheduler interval |
 | `REGION` | 1 | Opt | `us-central1` | `run_local.sh`, scheduler | Deploy region |
 | `SCHEDULER_JOB_NAME` | 1 | Opt | `telegram-poll-job` | `run_local.sh` | Scheduler job paused/resumed during local runs |
-| `TEST_CHAT_REF` | 1 | Ref | — | `test/diagnose_chat.py` | Chat ref override for diagnostics |
+| `TEST_CHAT_REF` | 1 | Ref | — | `tests/diagnose_chat.py` | Chat ref override for diagnostics |
 | `GCS_BUCKET_NAME` | — | Ref | — | `project_env/config.py` only | Read but never consumed — legacy |
 | `GCS_CLOUD_PROJECT` | — | Ref | — | `project_env/config.py` only | Read but never consumed — legacy |
 | `K_SERVICE` | 3 | Ref | auto | `main.py` | GCF-injected; used to detect cloud vs local |

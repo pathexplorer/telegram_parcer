@@ -10,13 +10,13 @@ Purpose:
 
 Usage:
     # By username
-    uv run python test/diagnose_chat.py @mobilization_law
+    uv run python tests/diagnose_chat.py @mobilization_law
 
     # By numeric ID
-    uv run python test/diagnose_chat.py 1511100059
+    uv run python tests/diagnose_chat.py 1511100059
 
     # Via environment variable
-    TEST_CHAT_REF=@mobilization_law uv run python test/diagnose_chat.py
+    TEST_CHAT_REF=@mobilization_law uv run python tests/diagnose_chat.py
 
 Output:
     A step-by-step diagnostic report showing:

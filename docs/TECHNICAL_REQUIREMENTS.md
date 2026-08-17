@@ -118,7 +118,7 @@ Cloud Scheduler ──OIDC HTTP──▶ Cloud Function (Gen 2) main(request)
 | `scripts/manage_config.py` (+ `.sh`) | CLI to manage chats/keywords/cursors in Firestore. |
 | `scripts/e2e_test.py` (+ `.sh`) | End-to-end live pipeline smoke test. |
 | `emergency/reset_cursors.py` | Emergency cursor reset utility. |
-| `test/diagnose_chat.py` | Chat accessibility diagnostic tool. |
+| `tests/diagnose_chat.py` | Chat accessibility diagnostic tool. |
 | `deploy.sh`, `start.yaml`, `run_local.sh` | Deployment pipeline and safe local runner. |
 | `alert_policy.json` | Cloud Monitoring alert policy for CRITICAL logs. |
 

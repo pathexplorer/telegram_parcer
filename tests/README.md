@@ -11,13 +11,13 @@ what succeeds and what fails.
 
 ```bash
 # By username (including @ prefix)
-uv run python test/diagnose_chat.py @mobilization_law
+uv run python tests/diagnose_chat.py @mobilization_law
 
 # By numeric ID
-uv run python test/diagnose_chat.py 1511100059
+uv run python tests/diagnose_chat.py 1511100059
 
 # Via environment variable
-TEST_CHAT_REF=1511100059 uv run python test/diagnose_chat.py
+TEST_CHAT_REF=1511100059 uv run python tests/diagnose_chat.py
 
 # Or, after `uv sync`, use the console entry point:
 uv run diagnose 1511100059
