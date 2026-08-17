@@ -19,13 +19,15 @@ from unittest.mock import MagicMock, AsyncMock, patch, call
 
 import pytest
 
-from telegram.listener import (
+from telegram.helpers import (
     _should_stop,
     _safe_title,
-    _save_cursor_sync,
     _chat_sort_key,
     _get_priority_chat_refs,
     _find_matching_keywords,
+)
+from telegram.cursor import (
+    _save_cursor_sync,
 )# NOTE: poll_telegram is NOT imported at module level — it is imported
 # lazily inside each test's ``with patch(...)`` block so that the mocked
 # TelegramClient / StringSession / FirestoreMagic are bound first.
@@ -325,9 +327,9 @@ class TestPollTelegramLifecycle:
         with patch("telegram.listener.TelegramClient", _ClientCtx), \
              patch("telegram.listener.StringSession"), \
              patch("telegram.listener.FirestoreMagic", return_value=fs), \
-             patch("telegram.listener.send_health_alert", new=AsyncMock()), \
-             patch("telegram.listener.send_bot_notification", new=AsyncMock()), \
-             patch("telegram.listener.asyncio.sleep", new=AsyncMock()):
+             patch("telegram.polling.send_health_alert", new=AsyncMock()), \
+             patch("telegram.polling.send_bot_notification", new=AsyncMock()), \
+             patch("telegram.polling.asyncio.sleep", new=AsyncMock()):
             from telegram.listener import poll_telegram
             asyncio.run(poll_telegram(
                 KEYWORDS_LIST=["urgent"],
@@ -491,11 +493,11 @@ def _poll_with_mocks(cursor_base, dialogs, messages_by_chat, *,
     with patch("telegram.listener.TelegramClient", _ClientCtx), \
          patch("telegram.listener.StringSession"), \
          patch("telegram.listener.FirestoreMagic", return_value=fs), \
-         patch("telegram.listener.send_alert", new=send_alert), \
-         patch("telegram.listener.send_bot_notification", new=notif), \
-         patch("telegram.listener.send_health_alert", new=health), \
-         patch("telegram.listener.save_matched_message_to_firestore", new=archive), \
-         patch("telegram.listener.asyncio.sleep", new=AsyncMock()):
+         patch("telegram.polling.send_alert", new=send_alert), \
+         patch("telegram.polling.send_bot_notification", new=notif), \
+         patch("telegram.polling.send_health_alert", new=health), \
+         patch("telegram.polling.save_matched_message_to_firestore", new=archive), \
+         patch("telegram.polling.asyncio.sleep", new=AsyncMock()):
         from telegram.listener import poll_telegram
         asyncio.run(poll_telegram(
             KEYWORDS_LIST=list(keywords),
