@@ -1,7 +1,7 @@
 # Config Manifest — Telegram Parser
 
 Single source of truth for all environment variables, secrets, and runtime
-configuration. Readme.md keeps structural prose only; every config fact lives here.
+configuration. INSTRUCTION.md keeps structural prose only; every config fact lives here.
 
 ## 1. Layers — where configuration lives
 
@@ -84,9 +84,9 @@ gcloud secrets create "$TELEGRAM_SECRETS" --project="$PROJECT_ID"
 #   payload = {"API_ID":…, "API_HASH":…, "BOT_TOKEN":…,
 #              "session_string":…, "NOTIFICATION_CHAT":…}
 
-# 4. Provision (see Readme → Setup & Installation for full commands):
+# 4. Provision (see INSTRUCTION.md → Setup & Installation for full commands):
 gcloud iam service-accounts create tele-looker-wizard   # + roles: CF invoker/deployer, SA user
-gcloud scheduler jobs create http telegram-poll-job \   # step E in Readme
+gcloud scheduler jobs create http telegram-poll-job \   # step E in INSTRUCTION.md
   --schedule "*/10 5-21 * * *" --uri "https://${REGION}-${PROJECT_ID}.cloudfunctions.net/telegramPoller"
 
 # 5. Seed runtime config (Firestore)

@@ -1,9 +1,9 @@
-# Telegram Parser
-![telegram_parcer](cover.webp)
+# Telegram Parser — Instructions
 
-> **Formal specification:** see [docs/TECHNICAL_REQUIREMENTS.md](docs/TECHNICAL_REQUIREMENTS.md)
+> **Project overview & illustrations:** see [../README.md](../README.md).
+> **Formal specification:** see [TECHNICAL_REQUIREMENTS.md](TECHNICAL_REQUIREMENTS.md)
 > for the formal requirements (FR/NFR), data model, failure modes and traceability matrix.
-> This README covers setup, operation and troubleshooting.
+> This document covers setup, operation and troubleshooting.
 
 ## Overview
 
@@ -683,7 +683,7 @@ gcloud iam service-accounts add-iam-policy-binding $SERVICE_ACCOUNT \
 
 The script automatically:
 - Detects your **GCP project ID** from `gcloud config`
-- Finds the **service account** (`tele-looker-wizard@...`) documented in the README
+- Finds the **service account** (`tele-looker-wizard@...`) documented in the INSTRUCTION.md → Setup & Installation section
 - Passes all required substitutions to Cloud Build
 - After deploy, **waits for the scheduler to fire** and polls logs until the heartbeat confirms the function is alive
 

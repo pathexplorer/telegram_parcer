@@ -1,6 +1,6 @@
 # Technical Requirements — Telegram Parser
 
-> **Setup & operations:** see [../Readme.md](../Readme.md) for prerequisites,
+> **Setup & operations:** see [../README.md](../README.md) for prerequisites,
 > first-time setup, deployment, local mode and troubleshooting. This document is
 > the formal specification only.
 
