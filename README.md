@@ -2,9 +2,10 @@
 
 ![telegram_parcer](cover.webp)
 
-> **Setup & operation:** see [docs/INSTRUCTION.md](docs/INSTRUCTION.md) for full
+> **Setup & operation:** see [documentation/INSTRUCTION.md](documentation/INSTRUCTION.md) for full
 > installation, deployment, testing and troubleshooting.
-> **Formal specification:** see [docs/TECHNICAL_REQUIREMENTS.md](docs/TECHNICAL_REQUIREMENTS.md).
+> **Formal specification (real):** see [documentation/TRD.md](documentation/TRD.md).
+> **Retrospective spec (AI reverse):** see [documentation/TRD_reverse.md](documentation/TRD_reverse.md).
 
 ## Overview
 
@@ -48,6 +49,8 @@ load config → poll channels (cursor-based) → match keywords → archive to F
 
 ## Documentation
 
-- [docs/INSTRUCTION.md](docs/INSTRUCTION.md) — setup, deployment, testing, troubleshooting
-- [docs/TECHNICAL_REQUIREMENTS.md](docs/TECHNICAL_REQUIREMENTS.md) — formal requirements (FR/NFR), data model, traceability matrix
-- [docs/config-manifest.md](docs/config-manifest.md) — environment variables and configuration reference
+- [documentation/INSTRUCTION.md](documentation/INSTRUCTION.md) — setup, deployment, testing, troubleshooting
+- [documentation/TRD.md](documentation/TRD.md) — real TRD (source of truth, to be filled)
+- [documentation/TRD_reverse.md](documentation/TRD_reverse.md) — AI reverse-engineered formal requirements (FR/NFR), data model, traceability matrix
+- [documentation/config-manifest.md](documentation/config-manifest.md) — environment variables and configuration reference (real)
+- [documentation/config-manifest_reverse.md](documentation/config-manifest_reverse.md) — AI reverse-engineered config manifest

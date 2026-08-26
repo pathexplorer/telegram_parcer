@@ -1,3 +1,12 @@
+> **⚠️ TRD_reverse — AI reverse-engineering placeholder**
+>
+> This file is the **future result of an AI analysis** that performs reverse-engineering of the implemented project,
+> pretending the project was written from a spec. It formalizes the system *as it exists* (retrospective spec).
+> Do not edit manually as source of truth — the real spec is [TRD.md](TRD.md).
+> Expected generation: `AI -> codebase -> TRD_reverse.md`. Currently contains the last generated version.
+
+---
+
 # Technical Requirements — Telegram Parser
 
 > **Setup & operations:** see [../README.md](../README.md) for prerequisites,
