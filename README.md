@@ -14,7 +14,7 @@ specified public channels, search for defined keywords in real-time, and send al
 when matches are found. It utilizes the [Telethon](https://docs.telethon.dev/en/stable/)
 library for interacting with the Telegram API.
 
-![Scheme](docs/Diagram.drawio.png)
+![Scheme](documentation/Diagram.drawio.png)
 
 Key features:
 
