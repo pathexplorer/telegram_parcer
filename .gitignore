@@ -8,6 +8,7 @@ _old/
 *.bkp
 # Private AI recruiter review — never push to GitHub (matches at any depth: documentation/_deep-analyze/)
 _deep-analyze/
+discussion/
 
 # --- CONFIGURATION FILES ---
 # *.yaml  # Intentionally removed — we need cloudbuild.yaml, dbt_project.yml, etc. tracked
@@ -64,17 +65,6 @@ build/
 **/target/generic_tests/
 **/target/snapshots/
 
-# --- TAILWIND OUTPUT ---
-**/output.css
 
-# --- FLASK-BABEL (compiled translation binaries) ---
-*.mo
 
-# This part may be legacy
-#
-# --- DROPBOX AND SYNCHRONIZATION ---
-# Dropbox sync metadata
-# These files track sync status and changes and often run into the thousands.
-.dropbox
-.dropbox.attr
-.dropbox.cache/
+
