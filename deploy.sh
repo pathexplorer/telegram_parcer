@@ -12,7 +12,8 @@
 # Requires:
 #   - pytest installed in .venv/
 #   - gcloud authenticated
-#   - GCS staging bucket: gs://handy-cache-476919-t4_self_cloudbuild/source
+#   - GCS staging bucket: gs://<project>_self_cloudbuild/source
+#     (override with STAGING_BUCKET=gs://...)
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -38,6 +39,7 @@ _REGION=$(grep '_REGION:' start.yaml | head -1 | awk '{print $2}')
 _GCP_PROJECT_ID=$(grep '_GCP_PROJECT_ID:' start.yaml | head -1 | awk '{print $2}' | tr -d '"')
 _SERVICE_ACCOUNT=$(grep '_SERVICE_ACCOUNT:' start.yaml | head -1 | awk '{print $2}' | tr -d '"')
 _ARTIFACT_REPO=$(grep '_ARTIFACT_REPO:' start.yaml | head -1 | awk '{print $2}' | tr -d '"')
+_ARTIFACT_PROJECT_ID=$(grep '_ARTIFACT_PROJECT_ID:' start.yaml | head -1 | awk '{print $2}' | tr -d '"')
 
 # Auto-detect empty values from gcloud config (fail early if still missing).
 if [[ -z "$_GCP_PROJECT_ID" ]]; then
@@ -47,6 +49,12 @@ if [[ -z "$_GCP_PROJECT_ID" ]]; then
     echo "❌ GCP_PROJECT_ID is not set. Run: gcloud config set project PROJECT_ID"
     exit 1
 fi
+
+# Artifact Registry defaults to the deployment project.
+_ARTIFACT_PROJECT_ID=${_ARTIFACT_PROJECT_ID:-$_GCP_PROJECT_ID}
+
+# Cloud Build source staging bucket (override with STAGING_BUCKET=gs://...).
+_STAGING_BUCKET=${STAGING_BUCKET:-gs://${_GCP_PROJECT_ID}_self_cloudbuild/source}
 
 # Auto-detect service account from the documented pattern (README Step B).
 if [[ -z "$_SERVICE_ACCOUNT" ]]; then
@@ -97,6 +105,7 @@ fi
 if [[ -n "$_ARTIFACT_REPO" ]]; then
     _SUBSTITUTIONS+=",_ARTIFACT_REPO=${_ARTIFACT_REPO}"
 fi
+_SUBSTITUTIONS+=",_ARTIFACT_PROJECT_ID=${_ARTIFACT_PROJECT_ID}"
 if [[ -n "${PRIORITY_CHAT_REFS:-}" ]]; then
     _SUBSTITUTIONS+=",_PRIORITY_CHAT_REFS=${PRIORITY_CHAT_REFS}"
 fi
@@ -104,7 +113,7 @@ fi
 gcloud builds submit \
     --config start.yaml \
     --substitutions=${_SUBSTITUTIONS} \
-    --gcs-source-staging-dir=gs://handy-cache-476919-t4_self_cloudbuild/source
+    --gcs-source-staging-dir="${_STAGING_BUCKET}"
 
 # ── Post-deploy smoke test ────────────────────────────────────────────
 if [[ "$SKIP_SMOKE" == false ]]; then

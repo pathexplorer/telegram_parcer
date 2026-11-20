@@ -701,7 +701,7 @@ You'll see output like:
 
 ```bash
 gcloud builds submit --config start.yaml \
-  --substitutions=_GCP_PROJECT_ID=$PROJECT_ID,_SERVICE_ACCOUNT=$SERVICE_ACCOUNT,_ARTIFACT_REPO=$AR_REPO \
+  --substitutions=_GCP_PROJECT_ID=$PROJECT_ID,_SERVICE_ACCOUNT=$SERVICE_ACCOUNT,_ARTIFACT_REPO=$AR_REPO,_ARTIFACT_PROJECT_ID=$PROJECT_ID \
   --gcs-source-staging-dir=gs://${PROJECT_ID}_self_cloudbuild/source
 ```
 
